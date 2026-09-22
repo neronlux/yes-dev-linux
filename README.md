@@ -173,6 +173,7 @@ brew install yes-dev-linux
 | `--approve-pattern` | Button label regex (default `^(allow\|approve)$`). Anchored so *Turn off in settings* is never hit. |
 | `--burst-limit` | Pause clicks 60s after this many approvals/min (default 60, `0` disables). Same default as upstream, measured not guessed. |
 | `--cool-off-s` | After 3 failed click attempts on one bubble, pause this long, then start a fresh 3-attempt cycle (default 30, `0` = old wait-forever). |
+| `--visual-backstop-s` | While idle and armed, glance at the screen every N seconds for an Allow button the child-count missed (0 disables; default 5). |
 | `--no-workspace-hunt` | Disable hunting workspaces for a hidden bubble (default: hunt up to 3, then switch back). |
 | `--restart-chrome-on-stuck` | Opt-in: when clustered stand-downs suggest a stuck consent queue, restart the Chrome holding :9222 (tabs restore) once per 30 min. Off by default — disruptive. |
 | `--exit-with-parent` | Exit when the launching process goes away (for supervised runs). |
@@ -334,6 +335,9 @@ the same one upstream's tray makes. This port ships with:
   Alt+Tab / Super+` focus walking), never before AT-SPI proves a Chrome
   window is active, and never to drive the dialog itself;
 - clicks pause entirely while the session is locked;
+- the idle visual backstop only fires for a button in the dialog region
+  (15-85% x, 20-80% y) seen twice at the same spot, and still verifies
+  before logging; `--visual-backstop-s 0` turns it off;
 - the only automation that kills anything is `--restart-chrome-on-stuck`,
   off by default, rate-limited to once per 30 min, and it logs loudly
   before terminating the browser (tabs restore).
@@ -388,6 +392,16 @@ the call hangs mid-handshake while the prompt is up).
 
 ## History
 
+- **v0.8.10** — visual backstop: the child-count bump can be missed when
+  a leaked node clears exactly as a new attach bumps (the count returns
+  to the value already recorded - observed live post-reboot, engine
+  blind to a visible prompt). While idle and armed the engine now
+  glances at the screen every 5s (`--visual-backstop-s`), and a button
+  found twice at the same spot in the dialog region becomes a candidate
+  through the normal click/verify flow. LIVE-PROVEN: caught the missed
+  bubble ~2s after restart, approved it with the leak note, client
+  unblocked. Totals stay unknown for backstop bubbles (base 0), so the
+  visual verify decides.
 - **v0.8.9** — workspace hunting + calibration: when the bubble is not
   reachable on the current workspace, the engine switches forward (up to
   3 workspaces, `--no-workspace-hunt` to disable), finds it, clicks and

@@ -2,7 +2,7 @@
 """Yes, Dev engine for Linux: watch for Chrome's "Allow remote debugging?"
 consent dialog through AT-SPI.
 
-Status: v0.8.9. Detection via AT-SPI is proven live (titled dialogs by
+Status: v0.8.10. Detection via AT-SPI is proven live (titled dialogs by
 title, untitled Wayland bubbles by window-geometry child totals).
 Auto-approval works via a visual pipeline, proven end-to-end on
 2026-09-22: xdg-desktop-portal screenshot (no prompt) -> PIL finds the
@@ -26,7 +26,9 @@ TESTING.md. Clicks pause while the session is locked, and an opt-in
 --restart-chrome-on-stuck turns the stuck-queue hint into a restart, and
 --selftest proves the whole stack without waiting for a real prompt.
 Off-workspace bubbles are hunted (up to 3 workspaces, switched back),
-and multi-monitor setups are detected and warned about.
+and multi-monitor setups are detected and warned about. An idle
+visual backstop catches prompts whose child-count bump was missed
+(leak aliasing - observed live after a reboot).
 
 Boot-safe: the systemd user service starts before the desktop exists
 (linger + default.target), so every dependency is re-acquired lazily and
@@ -126,6 +128,7 @@ NO_BUTTON_STOP = 3         # consecutive no-button looks before standing down
 NORMALIZE_ROUNDS = 3       # focus/maximize rounds per bubble before giving up
 LOCK_CACHE_S = 5           # how long a lock-state reading is trusted
 WORKSPACE_HUNT_MAX = 3     # off-workspace bubbles: hunt up to N workspaces over
+VISUAL_BACKSTOP_S = 5.0    # idle visual glance for bubbles the count missed (0=off)
 CHROME_RESTART_COOLDOWN_S = 1800  # opt-in restart: at most once per 30 min
 CLICKER_RETRY_S = 15.0     # re-try clicker creation (boot order, RDP resize)
 ATSPI_REINIT_AFTER = 20    # consecutive failed scans before re-initialising
@@ -217,7 +220,7 @@ class Engine:
                  dialog_pattern=DIALOG_PATTERN, approve_pattern=APPROVE_PATTERN,
                  burst_limit=BURST_LIMIT_DEFAULT, enable_click=False,
                  cool_off_s=CLICK_COOL_OFF_S, restart_chrome_on_stuck=False,
-                 workspace_hunt=True):
+                 workspace_hunt=True, visual_backstop_s=VISUAL_BACKSTOP_S):
         self.observe = observe
         self.poll_s = max(0.05, poll_ms / 1000.0)
         self.include_edge = include_edge
@@ -261,6 +264,8 @@ class Engine:
         self._ws_shift: dict[str, int] = {}
         self._ws_restore_on_start = 0
         self._monitors_warned = False
+        self.visual_backstop_s = visual_backstop_s
+        self._last_backstop = 0.0
         try:
             import json as _json
             st = _json.loads((Path(DATA_DIR) / "state.json").read_text())
@@ -708,6 +713,40 @@ class Engine:
             time.sleep(0.4)
         self.log(f"  restored the workspace ({shift} switch(es) back)", "INFO")
 
+    def _backstop_scan(self, now: float) -> None:
+        """Idle visual glance: the child-count bump can be missed when a
+        leaked node clears at the same time a new attach bumps (the count
+        returns to the value we already recorded - observed live after a
+        reboot). While armed and idle, look at the screen; if the Allow
+        button sits in the dialog region twice in a row at the same spot,
+        treat it as a candidate and let the normal click flow handle it."""
+        if auto_click is None:
+            return
+        shot = auto_click._portal_screenshot()
+        if not shot:
+            return
+        size = auto_click.image_size(shot)
+        pt = auto_click.find_allow_button(shot)
+        if pt is None or size is None:
+            return
+        # position prior: the consent bubble sits centre-screen, not in
+        # page flow; this keeps a stray page button pair from firing.
+        if not (0.15 * size[0] <= pt[0] <= 0.85 * size[0]
+                and 0.20 * size[1] <= pt[1] <= 0.80 * size[1]):
+            return
+        time.sleep(0.8)
+        shot2 = auto_click._portal_screenshot()
+        pt2 = auto_click.find_allow_button(shot2) if shot2 else None
+        if pt2 is None or abs(pt2[0] - pt[0]) > 10 or abs(pt2[1] - pt[1]) > 10:
+            return
+        dkey = "bubble:chrome:visual"
+        if dkey in self._pending:
+            return
+        self._pending[dkey] = 0          # totals unknown; visual verify decides
+        self._click_attempts[dkey] = 0
+        self.log(f"visual backstop: Allow button on screen at {pt2} with no child "
+                 f"bump (detection missed) - approving", "WARN")
+
     def _locked(self) -> bool:
         """True while the session is locked (org.gnome.ScreenSaver), cached
         ~5s. Clicks are pointless and risky on a lock screen, so the serve
@@ -900,12 +939,13 @@ class Engine:
             after = None
         vis_gone = after is not None and auto_click.find_allow_button(after) is None
         tot_gone = False
-        try:
-            key = tuple(dkey.split(":", 2)[1:])  # "bubble:<app>:<rect>"
-            e = self._rect_snapshot().get((key[0], key[1]))
-            tot_gone = e is None or e["total"] <= baseline
-        except Exception:
-            pass
+        if baseline:  # base 0 = visual backstop bubble, totals unknown
+            try:
+                key = tuple(dkey.split(":", 2)[1:])  # "bubble:<app>:<rect>"
+                e = self._rect_snapshot().get((key[0], key[1]))
+                tot_gone = e is None or e["total"] <= baseline
+            except Exception:
+                pass
         if vis_gone or tot_gone:
             # Either signal is enough: screenshots can lag a frame, and
             # queued attaches can keep the child total elevated after the
@@ -1242,6 +1282,11 @@ class Engine:
         if len(self._rects) > DEDUPE_MAX:
             for s in list(self._rects)[:len(self._rects) - DEDUPE_MAX]:
                 del self._rects[s]
+        if (self.enable_click and not self.observe and not self._pending
+                and self.visual_backstop_s > 0 and not self._locked()
+                and now - self._last_backstop >= self.visual_backstop_s):
+            self._last_backstop = now
+            self._backstop_scan(now)
         self._write_state(now)
 
     def probe(self):
@@ -1274,6 +1319,7 @@ class Engine:
             click_note = "ready" if clicker else "pending (will retry)"
         self.log(f"engine started (observe={self.observe}, interval={int(self.poll_s*1000)}ms, "
                  f"burst_limit={self.burst_limit}, cool_off={int(self.cool_off_s)}s, "
+                 f"backstop={int(self.visual_backstop_s)}s, "
                  f"enable_click={self.enable_click} "
                  f"({click_note}), atspi={detail}, pid={os.getpid()})")
         while True:
@@ -1352,6 +1398,10 @@ def main(argv=None):
     ap.add_argument("--observe", action="store_true", help="log dialogs, never click")
     ap.add_argument("--once", action="store_true", help="one sweep then exit")
     ap.add_argument("--probe", action="store_true", help="dump AT-SPI tree around Chrome, then exit")
+    ap.add_argument("--visual-backstop-s", type=float, default=VISUAL_BACKSTOP_S,
+                    help="while idle and armed, glance at the screen every N seconds "
+                         "for an Allow button the child-count missed (0 disables; "
+                         "default 5)")
     ap.add_argument("--no-workspace-hunt", action="store_false", dest="workspace_hunt",
                     help="do not switch through workspaces looking for a hidden "
                          "bubble (default: hunt up to 3, switch back after)")
@@ -1391,6 +1441,7 @@ def main(argv=None):
                     cool_off_s=args.cool_off_s,
                     restart_chrome_on_stuck=args.restart_chrome_on_stuck,
                     workspace_hunt=args.workspace_hunt,
+                    visual_backstop_s=args.visual_backstop_s,
                     burst_limit=args.burst_limit,
                     enable_click=args.enable_click)
     if args.probe:

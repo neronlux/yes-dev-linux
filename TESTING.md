@@ -298,7 +298,8 @@ for the loop.
 | 22 | Double-start | lock file | second engine exits | - |
 | 23 | Stale frame in verify | signals disagree | either signal accepts; disagreement logged | read the INFO note |
 | 24 | Restyled / localised button | finder returns None | normalize ladder, stand-down with reason | calibrate with --detect, open an issue |
-| 25 | Session locked | org.gnome.ScreenSaver GetActive (cached 5s) | clicks pause, pending waits, logged once/min | unlock; the bubble is handled right after (if its client is still waiting) |
+| 25 | Child bump missed (leak/clear race) | idle visual backstop glance (5s) | button seen twice at the same spot -> candidate -> normal click/verify | `--visual-backstop-s 0` disables |
+| 26 | Session locked | org.gnome.ScreenSaver GetActive (cached 5s) | clicks pause, pending waits, logged once/min | unlock; the bubble is handled right after (if its client is still waiting) |
 
 The engine writes `~/.local/share/YesDev/state.json` every ~5s (pid,
 approvals, pointer age, pending bubbles with attempts/normalize rounds,
