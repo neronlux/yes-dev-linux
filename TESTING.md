@@ -61,6 +61,29 @@ screenshot of every Chrome window. Compare against the no-prompt baseline
 - Screenshots during hangs showed no dialog on the two captured windows —
   capture ALL Chrome windows next time, and faster (the bubble may live
   only seconds if something else answers it).
+**Field notes, 2026-09-22 (GNOME/Wayland, Chrome 153), part 2 — first live fire:**
+
+- v0.5 detection PROVEN: `untitled bubble candidate (chrome)
+  window=0,0,1213x768 children 5->6` fired on a real hung attach.
+- First photograph of the Linux dialog: centered modal, three buttons
+  `[Turn off in settings] [Cancel] [Allow]`, Allow rightmost/primary.
+  Initial keyboard focus is on **Cancel**, not Allow.
+- Blind Enter with Cancel focused did nothing (lucky, not harmful) —
+  the v0.3 "press Enter" fallback is disproven as an approval method.
+  Do not re-add it without focus knowledge.
+- `Tab` moves focus (Cancel → … → Allow over two Tabs, verified by
+  focus-ring screenshots). `Space`/`Enter` on Allow-focused showed no
+  effect; coordinate clicks unverified (origin/accel uncertainty —
+  set accel `flat` for tests, restore `default` after).
+- `Escape` dismisses the ENTIRE queued stack at once (6 → 1) AND burns
+  the grant: afterwards autoConnect fast-fails with "Could not find
+  DevToolsActivePort" until remote debugging is toggled OFF/ON again.
+  Seen twice. Rule: after any full clear (approve OR dismiss), re-toggle
+  before new prompts can appear.
+- Operational: a `nohup` foreground engine survived its `timeout` and
+  held the single-instance lock, crash-looping the service (NRestarts=3).
+  Always `ps | grep watcher_linux` before blaming the service; use
+  `--once`/`--probe` beside a running service, never a second loop.
 - Keep stray `chrome-devtools-mcp` processes reaped
   (`pkill -f "[c]hrome-devtools-mcp"` — quoted to dodge self-match);
   35 orphans piled up during probing and muddy the water.

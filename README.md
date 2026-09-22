@@ -185,9 +185,10 @@ and no tray yet, so:
 - **English Chrome only** (same as upstream): matched by title string —
   but `--dialog-pattern`/`--approve-pattern` are exposed flags, so a
   localised build can be attempted without code changes.
-- **Enter-is-default assumption**: the fallback assumes Allow is the
-  default button. If your Chrome build orders buttons differently, the
-  fallback may dismiss without approving — check `yes-dev.log` for
+- **Enter-is-default assumption**: disproven live (initial focus is on
+  **Cancel**, and blind Enter did nothing). The engine therefore never
+  sends bare Enter; a future clicker must reach Allow by coordinates or
+  by Tab-walking from a verified start — check `yes-dev.log` for
   `APPROVED` vs `FAILED` lines.
 - No tray, no stay-on timer, no ask-first burst dialog yet. The engine
   refuses double-run via the lock and `--exit-with-parent` is available
