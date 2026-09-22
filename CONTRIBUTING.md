@@ -66,6 +66,15 @@ Two layers, both documented in [TESTING.md](TESTING.md):
    size change, AT-SPI re-init after repeated failures. Run this before
    every PR; add a check when you touch that logic.
 
+   ```bash
+   /usr/bin/python3 tests/test_finder.py   # synthetic dialog images: 7/7
+   ```
+
+   Locks the button-finder contract (dark pair accepted; single,
+   oversized, distant or misaligned clusters refused). Add a synthetic
+   image when you touch the finder; capture real restyles with
+   `auto_click.py --clusters shot.png`.
+
 2. **Live (needs a GNOME/Wayland session + Chrome with remote
    debugging):** reproduce the hang with
    `tools/consent-check.py 12`, capture with `--probe`, and follow the

@@ -287,7 +287,7 @@ for the loop.
 | 11 | Screenshot lag after click | total dropped, visual shows button | totals verify accepts + INFO note | - |
 | 12 | Phantom bubble (total elevated, nothing renders) | 3 no-button looks | normalize rounds, then stand-down | - |
 | 13 | Stuck consent queue (browser-side) | >=3 stand-downs in 10 min | stuck-queue remedy logged; `--restart-chrome-on-stuck` restarts Chrome (once/30min, opt-in) | toggle remote debugging / restart Chrome |
-| 14 | Bubble on another workspace | no-focus after MRU walk | stand-down, reason=no-focus | switch to the window manually |
+| 14 | Bubble on another workspace | no-focus after MRU walk | workspace hunt: Super+PageDown up to 3x, click on arrival, switch back; startup restores leftover switches | `--no-workspace-hunt` disables; truly unreachable cases stand down with reason |
 | 15 | Chrome not running / port closed | no candidates at all | engine silent | start Chrome; doctor flags it |
 | 16 | Consent gate burned (dismissed) | attaches fast-fail | engine silent | toggle remote debugging |
 | 17 | RDP resize mid-session | screenshot size change | pointer rebuilt at the new size | - |

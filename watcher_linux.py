@@ -2,7 +2,7 @@
 """Yes, Dev engine for Linux: watch for Chrome's "Allow remote debugging?"
 consent dialog through AT-SPI.
 
-Status: v0.8.8. Detection via AT-SPI is proven live (titled dialogs by
+Status: v0.8.9. Detection via AT-SPI is proven live (titled dialogs by
 title, untitled Wayland bubbles by window-geometry child totals).
 Auto-approval works via a visual pipeline, proven end-to-end on
 2026-09-22: xdg-desktop-portal screenshot (no prompt) -> PIL finds the
@@ -25,6 +25,8 @@ state.json feeds tools/doctor.py; the edge-case matrix lives in
 TESTING.md. Clicks pause while the session is locked, and an opt-in
 --restart-chrome-on-stuck turns the stuck-queue hint into a restart, and
 --selftest proves the whole stack without waiting for a real prompt.
+Off-workspace bubbles are hunted (up to 3 workspaces, switched back),
+and multi-monitor setups are detected and warned about.
 
 Boot-safe: the systemd user service starts before the desktop exists
 (linger + default.target), so every dependency is re-acquired lazily and
@@ -123,6 +125,7 @@ CLICK_COOL_OFF_S = 30.0    # pause between attempt cycles (0 = wait for clear)
 NO_BUTTON_STOP = 3         # consecutive no-button looks before standing down
 NORMALIZE_ROUNDS = 3       # focus/maximize rounds per bubble before giving up
 LOCK_CACHE_S = 5           # how long a lock-state reading is trusted
+WORKSPACE_HUNT_MAX = 3     # off-workspace bubbles: hunt up to N workspaces over
 CHROME_RESTART_COOLDOWN_S = 1800  # opt-in restart: at most once per 30 min
 CLICKER_RETRY_S = 15.0     # re-try clicker creation (boot order, RDP resize)
 ATSPI_REINIT_AFTER = 20    # consecutive failed scans before re-initialising
@@ -213,7 +216,8 @@ class Engine:
                  exit_with_parent=False, diagnostics=False,
                  dialog_pattern=DIALOG_PATTERN, approve_pattern=APPROVE_PATTERN,
                  burst_limit=BURST_LIMIT_DEFAULT, enable_click=False,
-                 cool_off_s=CLICK_COOL_OFF_S, restart_chrome_on_stuck=False):
+                 cool_off_s=CLICK_COOL_OFF_S, restart_chrome_on_stuck=False,
+                 workspace_hunt=True):
         self.observe = observe
         self.poll_s = max(0.05, poll_ms / 1000.0)
         self.include_edge = include_edge
@@ -253,6 +257,16 @@ class Engine:
         self._last_locked_log = 0.0
         self.restart_chrome_on_stuck = restart_chrome_on_stuck
         self._last_chrome_restart = 0.0
+        self.workspace_hunt = workspace_hunt
+        self._ws_shift: dict[str, int] = {}
+        self._ws_restore_on_start = 0
+        self._monitors_warned = False
+        try:
+            import json as _json
+            st = _json.loads((Path(DATA_DIR) / "state.json").read_text())
+            self._ws_restore_on_start = int(st.get("ws_shift_total", 0) or 0)
+        except Exception:
+            pass
         self.approved = 0
         self._parent_pid = os.getppid()
         self._seen: dict[str, float] = {}
@@ -666,6 +680,33 @@ class Engine:
         self._nobutton.pop(old, None)
         self._raised.discard(old)
         self._normalized[new] = self._normalized.pop(old, 0)
+        shift = self._ws_shift.pop(old, 0)
+        if shift:
+            self._ws_shift[new] = shift
+
+    def _ws_cleanup(self, dkey: str) -> None:
+        self._pending.pop(dkey, None)
+        self._click_attempts.pop(dkey, None)
+        self._cycle_next.pop(dkey, None)
+        self._click_last.pop(dkey, None)
+        self._nobutton.pop(dkey, None)
+        self._raised.discard(dkey)
+        self._normalized.pop(dkey, None)
+
+    def _ws_restore(self, dkey: str) -> None:
+        """Switch back any workspaces the hunt advanced for this bubble."""
+        shift = self._ws_shift.pop(dkey, 0)
+        if not shift:
+            return
+        clicker = self._get_clicker(None)
+        if clicker is None:
+            self.log(f"  WARNING: could not restore {shift} workspace switch(es) - "
+                     f"press Super+PageUp {shift} time(s) yourself", "ERROR")
+            return
+        for _ in range(shift):
+            auto_click.combo(clicker, "wsup")
+            time.sleep(0.4)
+        self.log(f"  restored the workspace ({shift} switch(es) back)", "INFO")
 
     def _locked(self) -> bool:
         """True while the session is locked (org.gnome.ScreenSaver), cached
@@ -783,8 +824,11 @@ class Engine:
                 "pending": [{"key": k,
                              "attempts": self._click_attempts.get(k, 0),
                              "normalize_rounds": self._normalized.get(k, 0),
-                             "no_button_looks": self._nobutton.get(k, 0)}
+                             "no_button_looks": self._nobutton.get(k, 0),
+                             "ws_shift": self._ws_shift.get(k, 0)}
                             for k in self._pending],
+                "workspace_hunt": self.workspace_hunt,
+                "ws_shift_total": sum(self._ws_shift.values()),
                 "last_scan_ms": self._last_scan_ms,
                 "last_error": self._last_error,
                 "last_action": self._last_action,
@@ -920,6 +964,25 @@ class Engine:
         if diag_sweep:
             self._next_diagnostic_at = now + 5
             self.log(f"diagnostic sweep start parent={os.getppid()} expected={self._parent_pid}", "DIAG")
+        if self._ws_restore_on_start and self.enable_click and not self._locked():
+            clicker = self._get_clicker(None)
+            if clicker is not None:
+                for _ in range(self._ws_restore_on_start):
+                    auto_click.combo(clicker, "wsup")
+                    time.sleep(0.4)
+                self.log(f"  restored {self._ws_restore_on_start} leftover workspace "
+                         f"switch(es) from a previous run", "INFO")
+                self._ws_restore_on_start = 0
+        if not self._monitors_warned and self.enable_click and auto_click is not None:
+            self._monitors_warned = True
+            try:
+                n = auto_click.monitor_count()
+                if n > 1:
+                    self.log(f"  {n} logical monitors detected - click coordinates are "
+                             f"only validated on single-monitor setups; please report "
+                             f"your experience", "WARN")
+            except Exception:
+                pass
         t0 = time.monotonic()
         diag = [] if diag_sweep else None
         try:
@@ -999,6 +1062,7 @@ class Engine:
                 # bubble's pre-bump base, it is gone: forget it entirely.
                 base = self._pending.get(dkey)
                 if base is not None and e["total"] <= base:
+                    self._ws_restore(dkey)
                     self._pending.pop(dkey, None)
                     self._click_attempts.pop(dkey, None)
                     self._cycle_next.pop(dkey, None)
@@ -1057,6 +1121,7 @@ class Engine:
             status, how = self._approve_visual(dkey, base)
             if status == "approved":
                 self._note_action()
+                self._ws_restore(dkey)
                 self._pending.pop(dkey, None)
                 self._click_attempts.pop(dkey, None)
                 self._cycle_next.pop(dkey, None)
@@ -1077,8 +1142,9 @@ class Engine:
                     # Before standing down: force Chrome to the front and
                     # maximize it, then keep tracking the bubble under the
                     # new geometry. Focus is AT-SPI-verified before any key
-                    # is sent; capped at two normalize attempts per bubble.
-                    norm = self._normalize_host(dkey)
+                    # is sent; capped at three normalize attempts per bubble.
+                    shift = self._ws_shift.get(dkey, 0)
+                    norm = (self._normalize_host(dkey) if shift == 0 else None)
                     if norm:
                         # Keep tracking the original host: if its geometry
                         # changed (maximized), the stale-rect migration
@@ -1089,8 +1155,27 @@ class Engine:
                         self._nobutton.pop(dkey, None)
                         self._raised.discard(dkey)
                         self.log("  retrying on the re-focused window", "INFO")
+                    elif self.workspace_hunt and shift < WORKSPACE_HUNT_MAX:
+                        # The bubble may live on another workspace. Advance
+                        # one workspace per stand-down (bounded), keep the
+                        # pending, and switch everything back afterwards.
+                        clicker = self._get_clicker(None)
+                        if clicker is not None and auto_click.combo(clicker, "wsdown"):
+                            self._ws_shift[dkey] = shift + 1
+                            self._click_attempts[dkey] = 0
+                            self._nobutton.pop(dkey, None)
+                            self._raised.discard(dkey)
+                            self.log(f"  bubble not reachable here - hunting the next "
+                                     f"workspace ({shift + 1}/{WORKSPACE_HUNT_MAX}); "
+                                     f"switches back afterwards", "AUDIT")
+                            continue
+                        reason = "workspace-hunt-keys-unavailable"
+                        self._ws_restore(dkey)
+                        self.log(f"  giving up on this bubble - reason={reason}", "WARN")
+                        self._ws_cleanup(dkey)
                     else:
                         reason = self._norm_reason or "no-visible-button"
+                        self._ws_restore(dkey)
                         self.log(f"  giving up on this bubble after "
                                  f"{NORMALIZE_ROUNDS} normalize rounds - "
                                  f"reason={reason}; a new child bump re-arms",
@@ -1105,13 +1190,7 @@ class Engine:
                                          "chrome://inspect/#remote-debugging, restart "
                                          "Chrome, or rerun with --restart-chrome-on-stuck",
                                          "WARN")
-                        self._pending.pop(dkey, None)
-                        self._click_attempts.pop(dkey, None)
-                        self._cycle_next.pop(dkey, None)
-                        self._click_last.pop(dkey, None)
-                        self._nobutton.pop(dkey, None)
-                        self._raised.discard(dkey)
-                        self._normalized.pop(dkey, None)
+                        self._ws_cleanup(dkey)
                 else:
                     self._nobutton[dkey] = nb
                     self.log(f"  Allow button not visible ({nb}/{NO_BUTTON_STOP}) - "
@@ -1152,6 +1231,7 @@ class Engine:
                 pass
             if migrated:
                 continue
+            self._ws_restore(stale)
             self._pending.pop(stale, None)
             self._click_attempts.pop(stale, None)
             self._cycle_next.pop(stale, None)
@@ -1272,6 +1352,9 @@ def main(argv=None):
     ap.add_argument("--observe", action="store_true", help="log dialogs, never click")
     ap.add_argument("--once", action="store_true", help="one sweep then exit")
     ap.add_argument("--probe", action="store_true", help="dump AT-SPI tree around Chrome, then exit")
+    ap.add_argument("--no-workspace-hunt", action="store_false", dest="workspace_hunt",
+                    help="do not switch through workspaces looking for a hidden "
+                         "bubble (default: hunt up to 3, switch back after)")
     ap.add_argument("--selftest", action="store_true",
                     help="check AT-SPI, portal screenshot, pointer device and click "
                          "delivery, then exit (briefly opens the clock popup)")
@@ -1307,6 +1390,7 @@ def main(argv=None):
                     approve_pattern=re.compile(args.approve_pattern, re.I),
                     cool_off_s=args.cool_off_s,
                     restart_chrome_on_stuck=args.restart_chrome_on_stuck,
+                    workspace_hunt=args.workspace_hunt,
                     burst_limit=args.burst_limit,
                     enable_click=args.enable_click)
     if args.probe:

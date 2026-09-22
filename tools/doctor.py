@@ -73,6 +73,17 @@ if sc:
         "LOCKED - approvals wait for unlock" if locked else "unlocked",
         "unlock the session; the engine skips clicks while locked" if locked else None)
 
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    import auto_click
+    nmon = auto_click.monitor_count()
+    add("monitors", "ok" if nmon <= 1 else "warn",
+        f"{nmon} logical monitor(s)" if nmon else "unknown",
+        None if nmon <= 1 else "click coordinates are only validated on "
+                              "single-monitor setups")
+except Exception:
+    pass
+
 # --- engine log -------------------------------------------------------------
 lines = []
 try:

@@ -173,6 +173,7 @@ brew install yes-dev-linux
 | `--approve-pattern` | Button label regex (default `^(allow\|approve)$`). Anchored so *Turn off in settings* is never hit. |
 | `--burst-limit` | Pause clicks 60s after this many approvals/min (default 60, `0` disables). Same default as upstream, measured not guessed. |
 | `--cool-off-s` | After 3 failed click attempts on one bubble, pause this long, then start a fresh 3-attempt cycle (default 30, `0` = old wait-forever). |
+| `--no-workspace-hunt` | Disable hunting workspaces for a hidden bubble (default: hunt up to 3, then switch back). |
 | `--restart-chrome-on-stuck` | Opt-in: when clustered stand-downs suggest a stuck consent queue, restart the Chrome holding :9222 (tabs restore) once per 30 min. Off by default — disruptive. |
 | `--exit-with-parent` | Exit when the launching process goes away (for supervised runs). |
 | `--diagnostics` | Log scan timing every 5s. |
@@ -387,6 +388,16 @@ the call hangs mid-handshake while the prompt is up).
 
 ## History
 
+- **v0.8.9** — workspace hunting + calibration: when the bubble is not
+  reachable on the current workspace, the engine switches forward (up to
+  3 workspaces, `--no-workspace-hunt` to disable), finds it, clicks and
+  switches everything back — live-proven on a bubble parked on ws2
+  (approved first click, client unblocked, workspace restored). Leftover
+  switches from a crashed run are restored on startup (state.json).
+  Multi-monitor setups are now detected and warned about (coordinates
+  are only validated single-monitor). `auto_click.py --clusters`
+  dumps calibration cluster data, and tests/test_finder.py locks the
+  finder contract with synthetic dark/light/ambiguous images (7/7).
 - **v0.8.8** — host-targeted focusing and a self-test: the normalize
   ladder's window cycling now checks the ACTIVE window's rect against
   the tracked bubble host and keeps cycling until they match, instead

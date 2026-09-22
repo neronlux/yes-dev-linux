@@ -18,6 +18,7 @@ detection), python3-evdev (uinput device). All distro packages.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -144,6 +145,21 @@ def find_allow_button(png_path: str) -> tuple[int, int] | None:
     return allow[0], allow[1]
 
 
+def monitor_count() -> int:
+    """Number of logical monitors from Mutter's DisplayConfig (0 unknown).
+    Multi-monitor coordinate mapping is not yet validated, so the engine
+    only warns when it sees more than one."""
+    try:
+        out = subprocess.run(
+            ["gdbus", "call", "--session", "--dest", "org.gnome.Mutter.DisplayConfig",
+             "--object-path", "/org/gnome/Mutter/DisplayConfig",
+             "--method", "org.gnome.Mutter.DisplayConfig.GetCurrentState"],
+            capture_output=True, text=True, timeout=10).stdout
+        return len(re.findall(r"\(-?\d+,\s*-?\d+,\s*[\d.]+,\s*uint32", out))
+    except Exception:
+        return 0
+
+
 def _screen_size() -> tuple[int, int] | None:
     """Logical monitor size via Mutter's DisplayConfig (no prompt)."""
     try:
@@ -224,7 +240,8 @@ class AbsoluteClicker:
                     (e.ABS_Y, AbsInfo(0, 0, want[1] - 1, 0, 0, 1)),
                 ],
                 e.EV_KEY: [e.BTN_LEFT, e.KEY_LEFTMETA, e.KEY_LEFTALT,
-                           e.KEY_TAB, e.KEY_UP, e.KEY_ESC],
+                           e.KEY_TAB, e.KEY_UP, e.KEY_ESC,
+                           e.KEY_PAGEUP, e.KEY_PAGEDOWN],
             }
             dev = UInput(cap, name="yesdev absolute pointer", version=1)
         except Exception:
@@ -283,6 +300,8 @@ def combo(clicker, which: str) -> bool:
         "nextwindow": (e.KEY_LEFTMETA, e.KEY_GRAVE),  # cycle same-app windows
         "alttab": (e.KEY_LEFTALT, e.KEY_TAB),         # switch to previous window
         "escape": (e.KEY_ESC,),                       # dismiss a popup (selftest)
+        "wsdown": (e.KEY_LEFTMETA, e.KEY_PAGEDOWN),   # next workspace
+        "wsup": (e.KEY_LEFTMETA, e.KEY_PAGEUP),       # previous workspace
     }
     codes = combos.get(which)
     if not codes or clicker is None:
@@ -343,8 +362,48 @@ def allow_click(png_path: str | None = None) -> tuple[bool, str]:
     return True, f"clicked ({pt[0]},{pt[1]})"
 
 
+def list_button_clusters(png_path: str):
+    """All blue button-shaped clusters found: (cx, cy, w, h, px). Calibration aid."""
+    from PIL import Image
+    im = Image.open(png_path).convert("RGB")
+    w, h = im.size
+    px = im.load()
+    step = 2
+    pts = set()
+    for y in range(0, h, step):
+        for x in range(0, w, step):
+            r, g, b = px[x, y]
+            if _BLUE(r, g, b):
+                pts.add((x, y))
+    clusters, seen = [], set()
+    for p in pts:
+        if p in seen:
+            continue
+        stack, comp = [p], []
+        seen.add(p)
+        while stack:
+            cx, cy = stack.pop()
+            comp.append((cx, cy))
+            for dx in (-step, 0, step):
+                for dy in (-step, 0, step):
+                    n = (cx + dx, cy + dy)
+                    if n in pts and n not in seen:
+                        seen.add(n)
+                        stack.append(n)
+        if len(comp) >= MIN_CLUSTER_PX:
+            xs = [q[0] for q in comp]
+            ys = [q[1] for q in comp]
+            clusters.append(((min(xs) + max(xs)) // 2, (min(ys) + max(ys)) // 2,
+                             max(xs) - min(xs), max(ys) - min(ys), len(comp)))
+    clusters.sort(key=lambda c: c[0])
+    return clusters
+
+
 if __name__ == "__main__":
-    if len(sys.argv) >= 3 and sys.argv[1] == "--detect":
+    if len(sys.argv) >= 3 and sys.argv[1] == "--clusters":
+        for c in list_button_clusters(sys.argv[2]):
+            print(f"cluster cx={c[0]} cy={c[1]} w={c[2]} h={c[3]} px={c[4]}")
+    elif len(sys.argv) >= 3 and sys.argv[1] == "--detect":
         print(find_allow_button(sys.argv[2]))
     elif len(sys.argv) >= 4 and sys.argv[1] == "--click":
         c = AbsoluteClicker()
@@ -353,4 +412,5 @@ if __name__ == "__main__":
     elif len(sys.argv) >= 2 and sys.argv[1] == "--shot":
         print(_portal_screenshot(sys.argv[2] if len(sys.argv) > 2 else None))
     else:
-        print("usage: auto_click.py --detect PNG | --click X Y | --shot [DEST]")
+        print("usage: auto_click.py --detect PNG | --clusters PNG | "
+              "--click X Y | --shot [DEST]")
