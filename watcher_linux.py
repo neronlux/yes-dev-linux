@@ -2,7 +2,7 @@
 """Yes, Dev engine for Linux: watch for Chrome's "Allow remote debugging?"
 consent dialog through AT-SPI.
 
-Status: v0.7. Detection via AT-SPI is proven live (titled dialogs by
+Status: v0.8. Detection via AT-SPI is proven live (titled dialogs by
 title, untitled Wayland bubbles by window-geometry child totals).
 Auto-approval works via a visual pipeline, proven end-to-end on
 2026-09-22: xdg-desktop-portal screenshot (no prompt) -> PIL finds the
@@ -13,6 +13,13 @@ handshake. Gates: --enable-click (off by default), --observe always
 wins, burst guard, 3 attempts per bubble, and [ACTION] is logged only
 after the bubble is verified gone. The AT-SPI Action path (below) still
 serves stacks that expose the button (X11).
+
+Boot-safe: the systemd user service starts before the desktop exists
+(linger + default.target), so every dependency is re-acquired lazily and
+retried - the absolute pointer is rebuilt every 15s until Mutter/portal
+answer (and rebuilt on RDP resolution changes), and AT-SPI is
+re-initialised after 20 consecutive scan failures. A reboot recovers
+without a manual restart.
 
 Why no plain Invoke like Windows/macOS: on GNOME + Wayland (Chrome 153,
 verified Sep 2026, real profile, remote-debugging on port 9222 in
@@ -97,6 +104,8 @@ BURST_WINDOW_S = 60.0
 BURST_PAUSE_S = 60.0
 CLICK_MAX_ATTEMPTS = 3     # per bubble, then back off until it clears
 CLICK_RETRY_S = 1.0        # minimum gap between click attempts on one bubble
+CLICKER_RETRY_S = 15.0     # re-try clicker creation (boot order, RDP resize)
+ATSPI_REINIT_AFTER = 20    # consecutive failed scans before re-initialising
 
 _DIALOG_ROLES = {"dialog", "alert", "window", "frame"}
 
@@ -201,7 +210,9 @@ class Engine:
         self._click_attempts: dict[str, int] = {}
         self._click_last: dict[str, float] = {}
         self._clicker = None
-        self._clicker_failed = False
+        self._clicker_retry_at = 0.0
+        self._clicker_warned = False
+        self._scan_errors = 0
         self.approved = 0
         self._parent_pid = os.getppid()
         self._seen: dict[str, float] = {}
@@ -363,35 +374,69 @@ class Engine:
     def _note_action(self) -> None:
         self._action_times.append(time.time())
 
-    def _get_clicker(self):
-        """Lazy absolute-pointer device. None if unavailable (logged once)."""
-        if self._clicker is not None:
+    def _get_clicker(self, size=None):
+        """Absolute-pointer device, created on demand and retried until the
+        desktop is ready (boot order: the service starts before the a11y
+        bus, portal and Mutter exist, so a one-shot create would boot dead).
+        Passing `size` (from a fresh screenshot) also rebuilds on RDP
+        resolution changes."""
+        if self._clicker is not None and (size is None or size == self._clicker.size):
             return self._clicker
-        if auto_click is None or self._clicker_failed:
+        now = time.time()
+        if self._clicker is None and now < self._clicker_retry_at:
+            return None
+        if auto_click is None:
+            if not self._clicker_warned:
+                self.log("auto-click unavailable: auto_click module missing", "ERROR")
+                self._clicker_warned = True
+            self._clicker_retry_at = now + CLICKER_RETRY_S
             return None
         try:
-            clicker = auto_click.AbsoluteClicker()
-            if not clicker.available():
-                self._clicker_failed = True
-                self.log("auto-click unavailable: could not create the absolute "
-                         "pointer (evdev? /dev/uinput write? screen size?)", "ERROR")
-                return None
+            clicker = auto_click.AbsoluteClicker(size)
+            if not clicker.available(size):
+                raise RuntimeError("evdev/uinput/screen-size not ready")
         except Exception as exc:
-            self._clicker_failed = True
-            self.log(f"auto-click unavailable: {exc!r}", "ERROR")
+            if not self._clicker_warned:
+                self.log(f"auto-click not ready yet ({exc}); retrying every "
+                         f"{int(CLICKER_RETRY_S)}s - normal in the first seconds "
+                         f"after boot", "WARN")
+                self._clicker_warned = True
+            self._clicker_retry_at = now + CLICKER_RETRY_S
             return None
         self._clicker = clicker
+        self._clicker_warned = False
+        self._clicker_retry_at = 0.0
+        self.log(f"auto-click ready: absolute pointer {clicker.size}", "INFO")
         return clicker
+
+    def _note_scan(self, ok: bool) -> None:
+        """Re-init AT-SPI after a run of failures: at boot the a11y bus can
+        start after us, and a connection made too early never heals."""
+        if ok:
+            self._scan_errors = 0
+            return
+        self._scan_errors += 1
+        if self._scan_errors == ATSPI_REINIT_AFTER:
+            self.log(f"{self._scan_errors} consecutive scan failures - re-initialising "
+                     f"AT-SPI", "WARN")
+            try:
+                Atspi.init()
+            except Exception as exc:
+                self.log(f"AT-SPI re-init failed: {exc!r}", "ERROR")
+            self._scan_errors = 0
 
     def _approve_visual(self, dkey: str, baseline: int) -> str | None:
         """Screenshot -> find Allow -> click it. Returns a how-string only
         if the bubble total returned to baseline afterwards."""
-        clicker = self._get_clicker()
-        if clicker is None or auto_click is None:
+        if auto_click is None:
             return None
         shot = auto_click._portal_screenshot()
         if not shot:
             self.log("  screenshot failed (xdg-desktop-portal?)", "WARN")
+            return None
+        size = auto_click.image_size(shot)
+        clicker = self._get_clicker(size)
+        if clicker is None:
             return None
         pt = auto_click.find_allow_button(shot)
         if pt is None:
@@ -466,8 +511,10 @@ class Engine:
         diag = [] if diag_sweep else None
         try:
             hosts = self.find_dialog_hosts(diag=diag)
+            self._note_scan(True)
         except Exception as exc:
             self.log(f"scan error: {exc!r}", "ERROR")
+            self._note_scan(False)
             hosts = []
         if diag_sweep:
             ms = int((time.monotonic() - t0) * 1000)
@@ -521,8 +568,10 @@ class Engine:
         # Geometry keys survive tab-title churn, which defeats title keys.
         try:
             snap = self._rect_snapshot()
+            self._note_scan(True)
         except Exception as exc:
             self.log(f"bubble scan error: {exc!r}", "ERROR")
+            self._note_scan(False)
             snap = {}
         for key, e in snap.items():
             prev = self._rects.get(key)
@@ -624,7 +673,8 @@ class Engine:
         ok, detail = atspi_available()
         click_note = "off"
         if self.enable_click:
-            click_note = "ready" if self._get_clicker() else "unavailable"
+            clicker = self._get_clicker()
+            click_note = "ready" if clicker else "pending (will retry)"
         self.log(f"engine started (observe={self.observe}, interval={int(self.poll_s*1000)}ms, "
                  f"burst_limit={self.burst_limit}, enable_click={self.enable_click} "
                  f"({click_note}), atspi={detail}, pid={os.getpid()})")

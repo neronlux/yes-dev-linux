@@ -156,6 +156,19 @@ boot -> user manager (linger) -> default.target -> yes-dev.service
   -> engine loop (250ms) --crash--> systemd Restart=always (5s)
 ```
 
+The service starts at boot **before** the desktop exists (on this VM the
+GNOME session comes up ~11s after the user manager), so nothing is
+acquired once-and-forgotten:
+
+- the absolute pointer is rebuilt every 15s until Mutter and the portal
+  answer, and again whenever the screenshot size changes (RDP resize);
+- AT-SPI is re-initialised after 20 consecutive failed scans;
+- a failed screenshot only warns for that bubble; the next sweep retries.
+
+A reboot therefore recovers without a manual restart. Use a **systemd
+user service, not cron**: the engine needs the session D-Bus (AT-SPI,
+portal), which cron does not have.
+
 Setup (already done on the author's VM; repeat anywhere):
 
 ```bash
@@ -173,16 +186,20 @@ Verify:
 
 ```bash
 systemctl --user is-active yes-dev.service     # active
-tail -f ~/.local/share/YesDev/yes-dev.log     # engine started ...
+systemctl --user is-enabled yes-dev.service    # enabled
+loginctl show-user $USER -p Linger              # Linger=yes
+tail -f ~/.local/share/YesDev/yes-dev.log      # "engine started ... (ready)"
 ```
+
+After an actual reboot, confirm in the log (within a minute of login):
+`engine started`, then `auto-click ready: absolute pointer (W, H)`, then
+`untitled bubble candidate` + `APPROVED` on the first attach.
 
 Notes:
 
-- Before your desktop session exists (boot, pre-login) AT-SPI has no
-  tree to read — sweeps log scan errors and retry; harmless, works after
-  login. `Restart=always` covers crashes; the single-instance lock covers
-  double-starts.
-- Updating: `cd ~/yes-dev-linux && git pull && systemctl --user restart yes-dev.service`.
+- Before your desktop session exists AT-SPI has no tree to read — sweeps
+  log scan errors and retry; harmless, works after login.
+- Updates: `cd ~/yes-dev-linux && git pull && systemctl --user restart yes-dev.service`.
 
 ## Read this before anything else
 
@@ -234,6 +251,10 @@ and call `list_pages` (the call hangs mid-handshake while the prompt is up).
 
 ## History
 
+- **v0.8** — boot-safe: clicker creation retried every 15s (a latched
+  failure would have booted dead when the service started before the
+  desktop), rebuild on screenshot-size change (RDP resize), AT-SPI
+  re-init after repeated scan failures. Verified live after restart.
 - **v0.7** — auto-approval works end to end: portal screenshot → PIL finds
   the Allow button → dedicated absolute uinput pointer clicks it →
   verified by the window's child total returning to base → `[ACTION]`.

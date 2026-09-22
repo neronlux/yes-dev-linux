@@ -187,12 +187,22 @@ def _screen_size() -> tuple[int, int] | None:
 class AbsoluteClicker:
     """A dedicated absolute uinput pointer. One instance per process."""
 
-    def __init__(self) -> None:
+    def __init__(self, size: tuple[int, int] | None = None) -> None:
         self.dev = None
-        self.size = None
+        self.size = size  # (w, h) in logical desktop pixels; None = ask Mutter
 
-    def available(self) -> bool:
-        if self.dev is not None:
+    def close(self) -> None:
+        try:
+            if self.dev is not None:
+                self.dev.close()
+        except Exception:
+            pass
+        self.dev = None
+
+    def available(self, size: tuple[int, int] | None = None) -> bool:
+        if self.dev is not None and (size is None or size == self.size):
+            return True
+        if size is not None and size == self.size and self.dev is not None:
             return True
         try:
             import evdev
@@ -200,15 +210,18 @@ class AbsoluteClicker:
             return False
         if not os.access("/dev/uinput", os.W_OK):
             return False
-        size = _screen_size()
-        if size is None or size[0] < 320 or size[1] < 200:
+        want = size or self.size or _screen_size()
+        if want is None or want[0] < 320 or want[1] < 200:
             return False
+        # A different size means the session changed (RDP resize, or we were
+        # created before the compositor existed): rebuild at the new size.
+        self.close()
         try:
             from evdev import AbsInfo, UInput, ecodes as e
             cap = {
                 e.EV_ABS: [
-                    (e.ABS_X, AbsInfo(0, 0, size[0] - 1, 0, 0, 1)),
-                    (e.ABS_Y, AbsInfo(0, 0, size[1] - 1, 0, 0, 1)),
+                    (e.ABS_X, AbsInfo(0, 0, want[0] - 1, 0, 0, 1)),
+                    (e.ABS_Y, AbsInfo(0, 0, want[1] - 1, 0, 0, 1)),
                 ],
                 e.EV_KEY: [e.BTN_LEFT],
             }
@@ -217,7 +230,7 @@ class AbsoluteClicker:
             return False
         time.sleep(0.4)  # let the compositor see the device
         self.dev = dev
-        self.size = size
+        self.size = want
         return True
 
     def click(self, x: int, y: int) -> bool:
@@ -240,6 +253,16 @@ class AbsoluteClicker:
             return True
         except Exception:
             return False
+
+
+def image_size(png_path: str) -> tuple[int, int] | None:
+    """Logical pixel size of a screenshot (also the desktop's logical size)."""
+    try:
+        from PIL import Image
+        with Image.open(png_path) as im:
+            return im.size
+    except Exception:
+        return None
 
 
 def allow_click(png_path: str | None = None) -> tuple[bool, str]:
