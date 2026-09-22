@@ -108,9 +108,25 @@ screenshot of every Chrome window. Compare against the no-prompt baseline
   Next ideas, untested: `F6` pane-focus into the bubble, Alt-underline
    mnemonics check, Chrome under XWayland (`--ozone-platform=x11`) where
    Views AT-SPI exposure may be complete.
+**Field notes, part 4 — verdict: no synthetic activation (same day, ctd.):**
+
+- `F6` + `Tab` do nothing observable (byte-identical screenshots before
+  and after; earlier "focus walked" readings were compression/time noise
+  — only trust same-minute full screenshots, and even those showed no
+  change). Keyboard focus cannot be moved into or within the bubble.
+- Pixel-measured clicks (desktop (802,340) and (856,342) from 1:1 window
+  shots, plus a full row/column sweep) all no-ops on the bubble, while
+  the same path toggles Activities and opens the calendar. Delivery
+  works; the secure Views bubble ignores synthetic pointer input.
+- Net verdict: on GNOME/Wayland + Chrome 153, NOTHING programmatic
+  reaches Allow — no AT-SPI objects, no pointer, no keys (except global
+  `Esc`, which dismisses AND burns the grant). This matches the threat
+  model behind closing #825 as not planned. v0.6 removed all activation
+  paths; the engine is a watchdog. Revisit only if Chrome exposes the
+  button (X11?) or a new input path appears.
 - Keep stray `chrome-devtools-mcp` processes reaped
   (`pkill -f "[c]hrome-devtools-mcp"` — quoted to dodge self-match);
-  35 orphans piled up during probing and muddy the water.
+  orphans pile up during probing and muddy the water.
 
 ## Stage 3 — fresh prompt (needs a Chrome restart)
 
