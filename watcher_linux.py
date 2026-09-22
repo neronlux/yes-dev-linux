@@ -17,11 +17,10 @@ below still approves it with identity-verified logging.
 Why no plain Invoke like Windows/macOS: on GNOME + Wayland (Chrome 153,
 verified Sep 2026, real profile, remote-debugging on port 9222 in
 DevToolsActivePort mode) every Chrome frame reports child_count 0 over
-AT-SPI, so usually there is no button object to press. The dialog is a
-Views bubble inside the frame; until a live prompt is captured with
---probe, the keyboard path stays experimental. Run:
+AT-SPI, so usually there is no button object to press - and no synthetic
+input (keys, pointer) reaches the secure Views bubble either. Run:
 
-    /usr/bin/python3 watcher_linux.py --observe    # log dialogs, never click
+    /usr/bin/python3 watcher_linux.py --observe    # log dialogs, never touch
     /usr/bin/python3 watcher_linux.py --once       # one sweep then exit
     /usr/bin/python3 watcher_linux.py --probe      # dump AT-SPI tree, exit
 
@@ -33,11 +32,9 @@ containing `[ACTION]` per approval, in the existing format
 and the counter / clouds / burst guard work unchanged. `[ACTION]` is only
 written after the dialog is verified gone.
 
-Requires the distro python (it ships python3-gi) and, only for the
-opt-in keyboard fallback, a running ydotoold:
+Requires the distro python (it ships python3-gi):
     sudo apt install python3-gi gir1.2-atspi-2.0
     /usr/bin/python3 watcher_linux.py --observe
-    /usr/bin/python3 watcher_linux.py --observe --enable-click  # experimental
 """
 from __future__ import annotations
 

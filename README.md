@@ -35,12 +35,11 @@ browser. Clicking Allow is the only route — that is what this does.
                         +--------+---------+
                                  | AT-SPI (read-only scan, 250ms)
                         +--------v---------+
-                        | watcher_linux.py |--- yes-dev.log ([ACTION] lines,
-                        |  detect -> gate  |    1 MB rollover)
-                        |  -> act -> verify|
-                        +--------+---------+
-                                 | only when gated AND no AT-SPI button:
-                                 | ydotool key Enter (needs ydotoold)
+                        | watcher_linux.py |--- yes-dev.log (candidates,
+                        |  detect -> log   |    1 MB rollover; [ACTION]
+                        |  (no input)      |    only if a button is ever
+                        +--------+---------+    exposed and pressed)
+                                 |
                         +--------v---------+
                         | systemd user unit|  Restart=always, starts at boot
                         | yes-dev.service  |  (linger + enabled)
