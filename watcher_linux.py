@@ -2,14 +2,14 @@
 """Yes, Dev engine for Linux: watch for Chrome's "Allow remote debugging?"
 consent dialog through AT-SPI.
 
-Status: v0.4. Detection via AT-SPI; click via AT-SPI Action when a button
-is exposed, otherwise an opt-in keyboard fallback (ydotool Enter) gated on
-the dialog's frame being the ACTIVE window, with a minimal burst guard
-(pause clicks 60s after 60 approvals/min) and a single-instance lock.
-On Wayland the bubble carries no title, so untitled bubbles are detected
-by child-count bump on a titled frame (field-verified 1->2->3 per pending
-attach, back to 1 after Enter). The keyboard fallback is still UNPROVEN
-as an approval - keep --observe until a live prompt proves it.
+Status: v0.5. Detection via AT-SPI: titled dialogs by title, untitled
+Wayland bubbles by window-geometry child totals (robust to tab-title
+churn; window open/close told apart by frame count). Click via AT-SPI
+Action when a button is exposed, otherwise an opt-in keyboard fallback
+(ydotool Enter) gated on the host window being ACTIVE, with a minimal
+burst guard (pause clicks 60s after 60 approvals/min) and a
+single-instance lock. The keyboard fallback is still UNPROVEN as an
+approval - keep --observe until a live prompt proves it.
 
 Why no plain Invoke like Windows/macOS: on GNOME + Wayland (Chrome 153,
 verified Sep 2026, real profile, remote-debugging on port 9222 in
@@ -209,7 +209,7 @@ class Engine:
         self.burst_limit = burst_limit
         self._action_times: deque[float] = deque()
         self._burst_paused_until = 0.0
-        self._counts: dict[str, int] = {}
+        self._rects: dict[tuple, tuple] = {}
         self.approved = 0
         self._parent_pid = os.getppid()
         self._seen: dict[str, float] = {}
@@ -399,49 +399,65 @@ class Engine:
     def _note_action(self) -> None:
         self._action_times.append(time.time())
 
-    def _frame_counts(self) -> dict:
-        """sig -> (kind, frame, child_count) for titled frames.
+    def _rect_snapshot(self) -> dict:
+        """(app, rect) -> {frames, total, titled, kind, frame}: child totals
+        grouped by window geometry.
 
         On Wayland the consent bubble exposes no title and no actionable
-        children, but the host frame's child_count bumps +1 per pending
-        bubble (field-verified). This is the only visible trace."""
+        children, but its host window's child total bumps +1 per pending
+        bubble (field-verified 1->2->3). Geometry keys survive tab-title
+        churn (which defeats title keys) and window-open/close is told
+        apart by the per-app frame count: a bubble adds children to an
+        EXISTING window (frame count unchanged), while a new window or a
+        status bubble adds a frame."""
         out = {}
         for kind, app in self._browser_apps():
-            for frame in _children(app):
-                title = _node_name(frame).strip()
-                if not title:
-                    continue
+            app_name = _node_name(app).strip() or kind
+            frames = _children(app)
+            fam = len(frames)
+            rects: dict = {}
+            for frame in frames:
                 if _role_name(frame).lower() not in _DIALOG_ROLES:
                     continue
+                b = _bounds(frame)
+                if b is None:
+                    continue
+                rect = f"{b[0]},{b[1]},{b[2]}x{b[3]}"
                 try:
                     n = frame.get_child_count()
                 except Exception:
                     continue
-                # Title-qualified: two windows can share geometry.
-                out[title.lower() + "|" + self._dedupe_key(frame)] = (kind, frame, n)
+                e = rects.setdefault(rect, {"total": 0, "titled": False, "frame": None})
+                e["total"] += n
+                if _node_name(frame).strip():
+                    e["titled"] = True
+                    if e["frame"] is None:
+                        e["frame"] = frame
+            for rect, e in rects.items():
+                out[(app_name, rect)] = {"frames": fam, "kind": kind, **e}
         return out
 
-    def _approve_keyboard_count(self, sig: str, baseline: int) -> str | None:
-        """Keyboard fallback verified by count: the bump must be gone."""
+    def _approve_keyboard_rect(self, key: tuple, baseline: int) -> str | None:
+        """Keyboard fallback verified by geometry total returning to baseline."""
         ok, detail = _ydotool_key(28)
         if not ok:
             self.log(f"  keyboard fallback unavailable ({detail})", "WARN")
             return None
         time.sleep(VERIFY_WAIT_S)
         try:
-            cur = self._frame_counts().get(sig)
+            cur = self._rect_snapshot().get(key)
         except Exception:
             return None
-        if cur is None or cur[2] <= baseline:
+        if cur is None or cur["total"] <= baseline:
             return "ydotool:Enter"
         ok2, _ = _ydotool_key(28)
         time.sleep(VERIFY_WAIT_S)
         if ok2:
             try:
-                cur2 = self._frame_counts().get(sig)
+                cur2 = self._rect_snapshot().get(key)
             except Exception:
                 return None
-            if cur2 is None or cur2[2] <= baseline:
+            if cur2 is None or cur2["total"] <= baseline:
                 return "ydotool:Enter+retry"
         return None
 
@@ -524,41 +540,45 @@ class Engine:
         if len(self._seen) > DEDUPE_MAX:
             cutoff = now - 300
             self._seen = {k: v for k, v in self._seen.items() if v >= cutoff}
-        # Untitled bubbles: titled frames whose child_count grew since last
-        # sweep. Title path above takes precedence for the same host.
+        # Untitled bubbles: window geometries whose child total grew while
+        # the per-app frame count stayed put (a bubble joins an EXISTING
+        # window; a new window or status bubble adds a frame instead).
+        # Geometry keys survive tab-title churn, which defeats title keys.
         try:
-            counts = self._frame_counts()
-            titled = {self._dedupe_key(h) for _, h in hosts}
+            snap = self._rect_snapshot()
         except Exception as exc:
             self.log(f"bubble scan error: {exc!r}", "ERROR")
-            counts, titled = {}, set()
-        for sig, (kind, frame, n) in counts.items():
-            baseline = self._counts.get(sig)
-            self._counts[sig] = n
-            if baseline is None or n <= baseline or sig in titled:
+            snap = {}
+        for key, e in snap.items():
+            prev = self._rects.get(key)
+            self._rects[key] = (e["frames"], e["total"])
+            if prev is None:
                 continue
-            key = "bubble:" + sig
-            last = self._seen.get(key)
+            pframes, ptotal = prev
+            if e["frames"] != pframes or e["total"] <= ptotal or not e["titled"]:
+                continue
+            dkey = "bubble:%s:%s" % (key[0], key[1])
+            last = self._seen.get(dkey)
             if last is not None and now - last < DEDUPE_SECONDS:
                 continue
-            self._seen[key] = now
-            self.log(f"untitled bubble candidate ({kind}) host={sig} "
-                     f"children {baseline}->{n} - consent bubble suspected")
+            self._seen[dkey] = now
+            self.log(f"untitled bubble candidate ({e['kind']}) window={key[1]} "
+                     f"children {ptotal}->{e['total']} - consent bubble suspected")
             if self.observe:
                 self.log("  observe mode - not clicking", "OBSERVE")
                 continue
             if not self.enable_click:
                 self.log("  left alone (re-run with --enable-click for the experimental keyboard fallback)", "WARN")
                 continue
-            if not _is_active(frame):
-                self.log("  host frame not ACTIVE - keyboard fallback refused; left alone", "WARN")
+            if e["frame"] is None or not _is_active(e["frame"]):
+                self.log("  host window not ACTIVE - keyboard fallback refused; left alone", "WARN")
                 continue
             if not self._burst_ok(now):
                 self.log("  burst-paused - not clicking", "WARN")
                 continue
             self.log("  keyboard fallback: host ACTIVE, sending Enter via ydotool", "AUDIT")
-            how = self._approve_keyboard_count(sig, baseline)
-            self._seen.pop(key, None)
+            how = self._approve_keyboard_rect(key, ptotal)
+            self._seen.pop(dkey, None)
             if how:
                 self._note_action()
                 self.approved += 1
@@ -566,11 +586,11 @@ class Engine:
                 self.log(f"  total approved this session: {self.approved}")
             else:
                 self.log("  FAILED: bubble still present after keyboard fallback - retrying next sweep", "ERROR")
-        for stale in [s for s in self._counts if s not in counts]:
-            del self._counts[stale]
-        if len(self._counts) > DEDUPE_MAX:
-            for s in list(self._counts)[:len(self._counts) - DEDUPE_MAX]:
-                del self._counts[s]
+        for stale in [s for s in self._rects if s not in snap]:
+            del self._rects[stale]
+        if len(self._rects) > DEDUPE_MAX:
+            for s in list(self._rects)[:len(self._rects) - DEDUPE_MAX]:
+                del self._rects[s]
 
     def probe(self):
         """Dump the AT-SPI tree around Chrome for porting work. No clicks."""
