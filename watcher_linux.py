@@ -2,27 +2,34 @@
 """Yes, Dev engine for Linux: watch for Chrome's "Allow remote debugging?"
 consent dialog through AT-SPI.
 
-Status: v0.6 watchdog. Detection via AT-SPI is proven live (titled
-dialogs by title, untitled Wayland bubbles by window-geometry child
-totals). Activation is REMOVED: field work 2026-09-22 proved no synthetic
-input reaches the secure Views bubble on GNOME/Wayland - AT-SPI exposes
-no objects (Collection: zero buttons), uinput pointer clicks land nowhere
-on it (delivery proven on shell UI), blind Enter risks the Turn-off
-button (focus is unpredictable), and rescan-absence can't tell approval
-from withdraw (two false [ACTION]s logged and retracted). The engine
-detects, logs, counts pending prompts, and leaves the click to a human.
-If a future Chrome/X11 stack exposes the button, the AT-SPI Action path
-below still approves it with identity-verified logging.
+Status: v0.7. Detection via AT-SPI is proven live (titled dialogs by
+title, untitled Wayland bubbles by window-geometry child totals).
+Auto-approval works via a visual pipeline, proven end-to-end on
+2026-09-22: xdg-desktop-portal screenshot (no prompt) -> PIL finds the
+rightmost blue button = Allow -> click through a dedicated ABSOLUTE
+uinput pointer (1:1 with the logical desktop; ydotool's relative device
+is accel-warped and misses). The hung CDP client then completes its
+handshake. Gates: --enable-click (off by default), --observe always
+wins, burst guard, 3 attempts per bubble, and [ACTION] is logged only
+after the bubble is verified gone. The AT-SPI Action path (below) still
+serves stacks that expose the button (X11).
 
 Why no plain Invoke like Windows/macOS: on GNOME + Wayland (Chrome 153,
 verified Sep 2026, real profile, remote-debugging on port 9222 in
 DevToolsActivePort mode) every Chrome frame reports child_count 0 over
-AT-SPI, so usually there is no button object to press - and no synthetic
-input (keys, pointer) reaches the secure Views bubble either. Run:
+AT-SPI and the bubble exposes no objects, so the button is found
+visually instead. Run:
 
-    /usr/bin/python3 watcher_linux.py --observe    # log dialogs, never touch
-    /usr/bin/python3 watcher_linux.py --once       # one sweep then exit
-    /usr/bin/python3 watcher_linux.py --probe      # dump AT-SPI tree, exit
+    /usr/bin/python3 watcher_linux.py --observe              # watch only
+    /usr/bin/python3 watcher_linux.py --observe --enable-click  # arm (observe wins)
+    /usr/bin/python3 watcher_linux.py --enable-click         # auto-approve
+    /usr/bin/python3 watcher_linux.py --once                 # one sweep
+    /usr/bin/python3 watcher_linux.py --probe                # dump AT-SPI tree
+
+Auto-click deps (all distro packages):
+    sudo apt install python3-gi gir1.2-atspi-2.0 python3-pil python3-evdev
+    # dbus-python for the portal screenshot; user must be in the input
+    # group (or otherwise have rw on /dev/uinput) to create the pointer.
 
 Contract with the tray (identical on all platforms): append a line
 containing `[ACTION]` per approval, in the existing format
@@ -56,6 +63,11 @@ except ImportError:
                                 atspi_available, ensure_data_dir)
 
 try:
+    import auto_click
+except Exception:
+    auto_click = None
+
+try:
     import gi
 
     gi.require_version("Atspi", "2.0")
@@ -83,6 +95,8 @@ VERIFY_WAIT_S = 0.5
 BURST_LIMIT_DEFAULT = 60   # approvals per window before pausing clicks
 BURST_WINDOW_S = 60.0
 BURST_PAUSE_S = 60.0
+CLICK_MAX_ATTEMPTS = 3     # per bubble, then back off until it clears
+CLICK_RETRY_S = 1.0        # minimum gap between click attempts on one bubble
 
 _DIALOG_ROLES = {"dialog", "alert", "window", "frame"}
 
@@ -169,7 +183,7 @@ class Engine:
                  include_edge=False, log_path=LOG_PATH,
                  exit_with_parent=False, diagnostics=False,
                  dialog_pattern=DIALOG_PATTERN, approve_pattern=APPROVE_PATTERN,
-                 burst_limit=BURST_LIMIT_DEFAULT):
+                 burst_limit=BURST_LIMIT_DEFAULT, enable_click=False):
         self.observe = observe
         self.poll_s = max(0.05, poll_ms / 1000.0)
         self.include_edge = include_edge
@@ -179,9 +193,15 @@ class Engine:
         self.dialog_pattern = dialog_pattern
         self.approve_pattern = approve_pattern
         self.burst_limit = burst_limit
+        self.enable_click = enable_click and not observe
         self._action_times: deque[float] = deque()
         self._burst_paused_until = 0.0
         self._rects: dict[tuple, tuple] = {}
+        self._pending: dict[str, int] = {}
+        self._click_attempts: dict[str, int] = {}
+        self._click_last: dict[str, float] = {}
+        self._clicker = None
+        self._clicker_failed = False
         self.approved = 0
         self._parent_pid = os.getppid()
         self._seen: dict[str, float] = {}
@@ -343,6 +363,61 @@ class Engine:
     def _note_action(self) -> None:
         self._action_times.append(time.time())
 
+    def _get_clicker(self):
+        """Lazy absolute-pointer device. None if unavailable (logged once)."""
+        if self._clicker is not None:
+            return self._clicker
+        if auto_click is None or self._clicker_failed:
+            return None
+        try:
+            clicker = auto_click.AbsoluteClicker()
+            if not clicker.available():
+                self._clicker_failed = True
+                self.log("auto-click unavailable: could not create the absolute "
+                         "pointer (evdev? /dev/uinput write? screen size?)", "ERROR")
+                return None
+        except Exception as exc:
+            self._clicker_failed = True
+            self.log(f"auto-click unavailable: {exc!r}", "ERROR")
+            return None
+        self._clicker = clicker
+        return clicker
+
+    def _approve_visual(self, dkey: str, baseline: int) -> str | None:
+        """Screenshot -> find Allow -> click it. Returns a how-string only
+        if the bubble total returned to baseline afterwards."""
+        clicker = self._get_clicker()
+        if clicker is None or auto_click is None:
+            return None
+        shot = auto_click._portal_screenshot()
+        if not shot:
+            self.log("  screenshot failed (xdg-desktop-portal?)", "WARN")
+            return None
+        pt = auto_click.find_allow_button(shot)
+        if pt is None:
+            self.log("  Allow button not found in screenshot - left alone", "WARN")
+            return None
+        self.log(f"  visual approve: clicking Allow at {pt}", "AUDIT")
+        if not clicker.click(*pt):
+            self.log("  click emit failed", "WARN")
+            return None
+        time.sleep(VERIFY_WAIT_S)
+        try:
+            cur = self._rect_snapshot()
+        except Exception:
+            return None
+        # Any window whose total is back at/below its own pre-bubble value is
+        # the clearest signal we can get that the click landed. The bubble's
+        # host is the window this candidate key belongs to.
+        try:
+            key = tuple(dkey.split(":", 2)[1:])  # "bubble:<app>:<rect>"
+            e = cur.get((key[0], key[1]))
+            if e is None or e["total"] <= baseline:
+                return f"abs-pointer click {pt}"
+        except Exception:
+            return None
+        return None
+
     def _rect_snapshot(self) -> dict:
         """(app, rect) -> {frames, total, titled, kind, frame}: child totals
         grouped by window geometry.
@@ -455,18 +530,70 @@ class Engine:
             if prev is None:
                 continue
             pframes, ptotal = prev
-            if e["frames"] != pframes or e["total"] <= ptotal or not e["titled"]:
-                continue
             dkey = "bubble:%s:%s" % (key[0], key[1])
-            last = self._seen.get(dkey)
-            if last is not None and now - last < DEDUPE_SECONDS:
+            if (e["frames"] != pframes or e["total"] <= ptotal or not e["titled"]):
+                # No new elevation this sweep. If the total has fallen to the
+                # bubble's pre-bump base, it is gone: forget it entirely.
+                base = self._pending.get(dkey)
+                if base is not None and e["total"] <= base:
+                    self._pending.pop(dkey, None)
+                    self._click_attempts.pop(dkey, None)
+                    self._click_last.pop(dkey, None)
                 continue
-            self._seen[dkey] = now
-            self.log(f"untitled bubble candidate ({e['kind']}) window={key[1]} "
-                     f"children {ptotal}->{e['total']} - consent bubble suspected; "
-                     f"no safe activation on Wayland, left for human click", "WARN")
+            # A bump happened. First time: record the base and announce.
+            if dkey not in self._pending:
+                self._pending[dkey] = ptotal
+                self._click_attempts[dkey] = 0
+                self.log(f"untitled bubble candidate ({e['kind']}) window={key[1]} "
+                         f"children {ptotal}->{e['total']} - consent bubble suspected")
+                if self.observe:
+                    self.log("  observe mode - not clicking", "OBSERVE")
+                elif not self.enable_click:
+                    self.log("  left alone (run with --enable-click to arm auto-approval)", "WARN")
+                else:
+                    self.log("  armed - will click Allow when found", "INFO")
+
+        # Serve every pending bubble: this is what retries after a click that
+        # Chrome swallowed mid-animation. Runs every sweep (cadence-gated),
+        # not only on transitions, so a persistent bubble is never abandoned.
+        for dkey, base in list(self._pending.items()):
+            if self.observe or not self.enable_click:
+                continue
+            attempts = self._click_attempts.get(dkey, 0)
+            if attempts >= CLICK_MAX_ATTEMPTS:
+                continue  # backed off; a new bump re-arms it
+            last_try = self._click_last.get(dkey, 0.0)
+            if now - last_try < CLICK_RETRY_S:
+                continue
+            if not self._burst_ok(now):
+                self.log("  burst-paused - not clicking", "WARN")
+                continue
+            self._click_last[dkey] = now
+            how = self._approve_visual(dkey, base)
+            if how:
+                self._note_action()
+                self._pending.pop(dkey, None)
+                self._click_attempts.pop(dkey, None)
+                self._click_last.pop(dkey, None)
+                self.approved += 1
+                self.log(f"  APPROVED via {how}", "ACTION")
+                self.log(f"  total approved this session: {self.approved}")
+            else:
+                attempts += 1
+                self._click_attempts[dkey] = attempts
+                if attempts >= CLICK_MAX_ATTEMPTS:
+                    self.log(f"  FAILED {attempts}/{CLICK_MAX_ATTEMPTS}: bubble still "
+                             f"present - backing off until it clears", "ERROR")
+                else:
+                    self.log(f"  FAILED {attempts}/{CLICK_MAX_ATTEMPTS}: bubble still "
+                             f"present after click - will retry", "WARN")
         for stale in [s for s in self._rects if s not in snap]:
             del self._rects[stale]
+        for stale in [s for s in list(self._pending)
+                      if not any(s.startswith(f"bubble:{k[0]}:{k[1]}") for k in snap)]:
+            self._pending.pop(stale, None)
+            self._click_attempts.pop(stale, None)
+            self._click_last.pop(stale, None)
         if len(self._rects) > DEDUPE_MAX:
             for s in list(self._rects)[:len(self._rects) - DEDUPE_MAX]:
                 del self._rects[s]
@@ -495,9 +622,12 @@ class Engine:
 
     def run(self):
         ok, detail = atspi_available()
+        click_note = "off"
+        if self.enable_click:
+            click_note = "ready" if self._get_clicker() else "unavailable"
         self.log(f"engine started (observe={self.observe}, interval={int(self.poll_s*1000)}ms, "
-                 f"burst_limit={self.burst_limit}, "
-                 f"atspi={detail}, pid={os.getpid()})")
+                 f"burst_limit={self.burst_limit}, enable_click={self.enable_click} "
+                 f"({click_note}), atspi={detail}, pid={os.getpid()})")
         while True:
             if self.exit_with_parent and os.getppid() != self._parent_pid:
                 self.log("parent process is gone - exiting rather than approving unsupervised", "WARN")
@@ -522,15 +652,20 @@ def main(argv=None):
     ap.add_argument("--exit-with-parent", action="store_true")
     ap.add_argument("--diagnostics", action="store_true")
     ap.add_argument("--burst-limit", type=int, default=BURST_LIMIT_DEFAULT,
-                    help="pause AT-SPI approvals for 60s after this many in a "
+                    help="pause approvals for 60s after this many in a "
                          "minute (0 disables; default 60, same as upstream)")
+    ap.add_argument("--enable-click", action="store_true",
+                    help="arm auto-approval: screenshot + absolute-pointer click "
+                         "on the Allow button (needs the auto-click deps; "
+                         "--observe always wins)")
     args = ap.parse_args(argv)
     engine = Engine(observe=args.observe, poll_ms=args.interval_ms,
                     include_edge=args.include_edge, log_path=Path(args.log_path),
                     exit_with_parent=args.exit_with_parent, diagnostics=args.diagnostics,
                     dialog_pattern=re.compile(args.dialog_pattern, re.I),
                     approve_pattern=re.compile(args.approve_pattern, re.I),
-                    burst_limit=args.burst_limit)
+                    burst_limit=args.burst_limit,
+                    enable_click=args.enable_click)
     if args.probe:
         return engine.probe()
     if args.once:

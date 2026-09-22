@@ -1,8 +1,7 @@
 # Testing the Linux engine against a live prompt
 
-The click path can only be proven against a REAL
-"Allow remote debugging?" prompt. This file is the repeatable procedure
-plus the field notes so far.
+The click path is proven (see Part 5). This file is the repeatable
+procedure plus the field notes so far.
 
 ## Background
 
@@ -110,6 +109,13 @@ screenshot of every Chrome window. Compare against the no-prompt baseline
    Views AT-SPI exposure may be complete.
 **Field notes, part 4 — verdict: no synthetic activation (same day, ctd.):**
 
+> **RETRACTED in part 5.** The two conclusions below were wrong: the
+> failures were a *relative* input device (subject to pointer
+> acceleration) plus coordinate arithmetic from scaled screenshots —
+> not Chrome rejecting synthetic input. Absolute-pointer clicks on the
+> correctly-measured button work, first try most of the time. Keep the
+> trap-lists (they are the reason for the retraction) and read part 5.
+
 - `F6` + `Tab` do nothing observable (byte-identical screenshots before
   and after; earlier "focus walked" readings were compression/time noise
   — only trust same-minute full screenshots, and even those showed no
@@ -127,6 +133,56 @@ screenshot of every Chrome window. Compare against the no-prompt baseline
 - Keep stray `chrome-devtools-mcp` processes reaped
   (`pkill -f "[c]hrome-devtools-mcp"` — quoted to dodge self-match);
   orphans pile up during probing and muddy the water.
+
+## Part 5 — breakthrough: auto-approval works
+
+Two root causes, both on our side, both found in one afternoon:
+
+1. **The input device was relative.** `ydotoold`'s device is a RELATIVE
+   evdev device (`REL=147`, no ABS), so its "absolute" moves are deltas
+   subject to GNOME pointer acceleration — they land wherever. The
+   `computer-use-linux absolute pointer` device is a true ABS device
+   (range 0..1279 / 0..799, i.e. 1:1 with the logical desktop) and hits
+   what you ask it to. A dedicated absolute device of our own
+   (`auto_click.AbsoluteClicker`, python3-evdev, `yesdev absolute
+   pointer`) does the same: verified by clicking the clock (calendar
+   opened) and then Allow.
+2. **The aim was wrong.** Screenshots arrive downscaled (`scale` field);
+   measuring Allow in the returned image and treating it as desktop
+   pixels put every click 20-50px off — outside the button. Measure in
+   a 1:1 capture, or detect the button programme-side.
+
+The working pipeline (v0.7, `auto_click.py`):
+
+```
+bubble suspected (child-total bump)
+  -> xdg-desktop-portal Screenshot (works from a plain process, no prompt)
+  -> PIL: blue-fill clusters (Chrome 153 dark measured fill (0,75,118))
+       -> the two side-by-side buttons; rightmost = Allow
+  -> AbsoluteClicker.click(x, y)  (1:1 absolute uinput)
+  -> child total back to base?  YES -> [ACTION] APPROVED
+```
+
+Live, unattended, on this VM (2026-09-22):
+
+```
+17:14:19.292 [INFO] untitled bubble candidate ... children 2->3
+17:14:19.292 [INFO]   armed - will click Allow when found
+17:14:19.485 [AUDIT]   visual approve: clicking Allow at (837, 363)
+17:14:20.114 [ACTION]   APPROVED via abs-pointer click (837, 363)
+client: "RESULT after 9.0s: RESPONDED"  # hung CDP call completed, no human
+```
+
+Also observed and handled: the **first click is occasionally swallowed**
+while the bubble animates in. The engine therefore retries (1s gap, max
+3 attempts, then waits for the bubble to clear); every retry after a
+swallowed click approved on attempt 2. `[ACTION]` is logged only after
+the child total returns to its pre-bubble base.
+
+Recap of what NOT to retry (all tried, all dead ends for good reasons):
+relative-device absolute moves, blind Enter (`Esc` burns the grant,
+focus is unpredictable), AT-SPI Collection walks (Chrome exposes no
+objects on Wayland), and F6/Tab focus walks.
 
 ## Stage 3 — fresh prompt (needs a Chrome restart)
 
@@ -155,22 +211,18 @@ at `chrome://inspect/#remote-debugging`, then retry Stage 1.
 ## What success looks like
 
 - Log shows `APPROVED via ...` with `[ACTION]`, total counter increments.
-- The hung MCP call answers within ~1s of the log line.
+- The hung MCP call answers within seconds of the log line.
 - `--probe` during a later hang shows the same count-bump shape, served
   next sweep (dedupe) — i.e. N queued prompts approved one per sweep.
 
-## End-to-end proof, 2026-09-22 (v0.6 watchdog + human click)
+## End-to-end proof, 2026-09-22
 
-Proven with a live client (600s window so the click lands while alive):
+Two proofs, in order of automation:
 
-1. Trigger attach → call hangs mid-handshake.
-2. Engine logs `untitled bubble candidate (chrome) window=0,0,1213x768
-   children 2->3 ... left for human click`, screenshot confirms the
-   dialog on screen.
-3. Human clicks **Allow** with a real mouse.
-4. The hung call **RESPONDS** (`## Pages ...`, 55.5s in) — grant works.
-5. Frame child count returns to baseline 1, toggle intact.
-
-Lesson: approving a DEAD client's prompt grants nothing — the click must
-land while its client is still waiting. Earlier "no grant" results were
-all expired-window artifacts, not approval failures.
+1. **Human click (v0.6), 55.5s in:** engine logged the candidate, a human
+   clicked Allow, the hung call responded, count returned to baseline.
+   Lesson: approving a DEAD client's prompt grants nothing — the click
+   must land while its client is still waiting.
+2. **Fully unattended (v0.7), 9.0s in:** engine logged candidate, clicked
+   Allow itself via the absolute pointer at 17:14:19-20, `[ACTION]`
+   written, hung client responded — no human in the loop.

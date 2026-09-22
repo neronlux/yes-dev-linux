@@ -9,12 +9,14 @@ macOS, MIT). This repo is the unofficial Linux port: same log contract
 (`[ACTION]` lines), same option shapes, different guts (AT-SPI instead of
 UI Automation / Accessibility API).
 
-> **Status: v0.6 watchdog.** Detection is proven live; synthetic
-> activation was attempted exhaustively and removed — on GNOME/Wayland no
-> programmatic input reaches the secure Views bubble (details in
-> TESTING.md), so the engine detects, logs, and counts pending prompts
-> instead of pretending to click. If your stack exposes the button
-> (e.g. X11), the AT-SPI Action path still approves it.
+> **Status: v0.7 — auto-approval works, proven end to end.** The engine
+> detects the consent bubble through AT-SPI, screenshots it through
+> xdg-desktop-portal, finds the Allow button visually, and clicks it
+> through a dedicated absolute uinput pointer. A genuinely hung CDP
+> client then completes its handshake — measured at ~1 second from
+> bubble to grant, unattended. On GNOME/Wayland the button is invisible
+> to every automation API, which is why the click is visual; details and
+> the full field record are in [TESTING.md](TESTING.md).
 
 ## Why this exists
 
@@ -33,12 +35,15 @@ browser. Clicking Allow is the only route — that is what this does.
                         |  (Views bubble   |  debugging on (:9222,
                         |  dialog host)    |  DevToolsActivePort mode)
                         +--------+---------+
-                                 | AT-SPI (read-only scan, 250ms)
+                                 | AT-SPI scan, 250ms (detect)
+                                 | portal screenshot (locate)
+                                 | abs-uinput pointer (click)
                         +--------v---------+
-                        | watcher_linux.py |--- yes-dev.log (candidates,
-                        |  detect -> log   |    1 MB rollover; [ACTION]
-                        |  (no input)      |    only if a button is ever
-                        +--------+---------+    exposed and pressed)
+                        | watcher_linux.py |--- yes-dev.log ([ACTION] lines,
+                        |  detect -> locate|    1 MB rollover)
+                        |  -> click ->     |
+                        |  verify gone     |
+                        +--------+---------+
                                  |
                         +--------v---------+
                         | systemd user unit|  Restart=always, starts at boot
@@ -46,11 +51,10 @@ browser. Clicking Allow is the only route — that is what this does.
                         +------------------+
 ```
 
-Upstream's seams are plain text (`tray -> engine -> overlay`), which is
-why a second platform drops in without touching shared logic. This port
-keeps the one seam that matters: the engine's entire interface is the
-`[ACTION]` log line, so a future tray (counter, clouds, burst guard) works
-unchanged whichever engine is running.
+Three seams stay text-only, as upstream designed: the engine's interface to
+anything watching is the `[ACTION]` log line; the button location comes from
+pixels; and the click is a kernel input device. A future tray (counter,
+clouds, burst guard) works unchanged whichever engine is running.
 
 ## How one sweep works
 
@@ -61,7 +65,20 @@ scan Chrome app frames (AT-SPI, title match, max 1 level deep)
   |                    |
   |                    +-- no growth --> quiet (~50ms scan is the common case)
   |                    +-- growth with frame count unchanged + titled window
-  |                                     --> untitled bubble candidate, log WARN
+  |                                     --> bubble pending, remember base total
+  |                                          |
+  |                                          +-- observe?        log OBSERVE
+  |                                          +-- not armed?      log WARN hint
+  |                                          +-- armed: screenshot via portal
+  |                                                -> rightmost blue button in
+  |                                                   the lower dialog area
+  |                                                   = Allow
+  |                                                -> click via absolute pointer
+  |                                                -> totals back to base?
+  |                                                   YES -> [ACTION], count++
+  |                                                   NO  -> retry (1s gap,
+  |                                                          max 3, then wait
+  |                                                          for it to clear)
   |
   +-- match     -->  dedupe (2s window, geometry signature)
                        |
@@ -72,33 +89,42 @@ scan Chrome app frames (AT-SPI, title match, max 1 level deep)
 
 Rules the engine never breaks:
 
-- **Verify before logging.** `[ACTION]` is written only after the dialog
-  is confirmed gone by AT-SPI ref identity. Never by rescan-absence
-  (which once logged two false approvals) and never by screen geometry:
-  Chrome draws a queued successor exactly where the last prompt was.
-- **No synthetic input.** The engine never moves the mouse, never steals
-  focus, never sends keys — v0.3–v0.5 proved none of it reaches the
-  secure Views bubble, and blind Enter once risked Turn-off.
+- **Verify before logging.** `[ACTION]` is written only after the dialog is
+  confirmed gone — by AT-SPI ref identity for the Action path, by the
+  window's child total returning to its pre-bubble base for the click path.
+  Never by rescan-absence alone, and never by screen geometry.
+- **Click only what the screenshot shows.** The Allow button is located in
+  a live full-screen capture, so if the bubble is occluded or the layout is
+  unexpected, detection finds no button pair and nothing is clicked.
+- **Off by default.** Auto-click needs `--enable-click`; `--observe` always
+  wins, and the burst guard pauses clicking if approvals spike.
 - **One engine.** A second copy exits on the single-instance lock instead
-  of double-pressing a dialog. `--once`/`--probe` bypass the lock on
+  of double-clicking a dialog. `--once`/`--probe` bypass the lock on
   purpose (diagnostics must work beside the service).
 
 ## Requirements
 
+No `pip install` — use the distro python (it ships `python3-gi`).
+Auto-click needs the visual + input stack as distro packages:
+
 ```bash
-sudo apt install python3-gi gir1.2-atspi-2.0   # AT-SPI via GObject Introspection
+sudo apt install python3-gi gir1.2-atspi-2.0 python3-pil python3-evdev dbus
 ```
 
-No `pip install` — use the distro python (it ships `python3-gi`).
+and the user must be able to write `/dev/uinput` (a udev rule giving the
+`input` group access, e.g. `KERNEL=="uinput", MODE="0660", GROUP="input"`,
+plus membership in `input`), because the click is a dedicated absolute
+pointer device, not a tool you have to install.
 
 ## Install & run
 
 ```bash
 git clone https://github.com/neronlux/yes-dev-linux.git
 cd yes-dev-linux
-/usr/bin/python3 watcher_linux.py --observe    # log dialogs, never click
-/usr/bin/python3 watcher_linux.py --once       # one sweep then exit
-/usr/bin/python3 watcher_linux.py --probe      # dump the AT-SPI tree, exit
+/usr/bin/python3 watcher_linux.py --observe                 # watch only
+/usr/bin/python3 watcher_linux.py --enable-click            # auto-approve
+/usr/bin/python3 watcher_linux.py --once                    # one sweep then exit
+/usr/bin/python3 watcher_linux.py --probe                   # dump AT-SPI tree, exit
 ```
 
 Or via Homebrew (Linuxbrew):
@@ -110,14 +136,15 @@ brew install yes-dev-linux
 
 | Flag | What it does |
 |---|---|
-| `--observe` | Log only, never touch anything (default posture). |
+| `--observe` | Log only, never click. Always wins over `--enable-click`. |
+| `--enable-click` | Arm auto-approval (screenshot → find Allow → click). Off by default. |
 | `--once` | One sweep then exit (diagnostic, bypasses lock). |
 | `--probe` | Dump the AT-SPI tree around Chrome, then exit. |
 | `--interval-ms` | Poll interval, default 250 (150/250/750 like upstream). |
 | `--include-edge` | Also watch Microsoft Edge windows. |
 | `--dialog-pattern` | Dialog title regex (default `^allow remote debugging\?$`). Localised Chrome? Start here. |
 | `--approve-pattern` | Button label regex (default `^(allow\|approve)$`). Anchored so *Turn off in settings* is never hit. |
-| `--burst-limit` | Pause AT-SPI approvals 60s after this many/min (default 60, `0` disables). Same default as upstream, measured not guessed. |
+| `--burst-limit` | Pause clicks 60s after this many approvals/min (default 60, `0` disables). Same default as upstream, measured not guessed. |
 | `--exit-with-parent` | Exit when the launching process goes away (for supervised runs). |
 | `--diagnostics` | Log scan timing every 5s. |
 | `--log-path` | Default `~/.local/share/YesDev/yes-dev.log`. |
@@ -135,7 +162,7 @@ Setup (already done on the author's VM; repeat anywhere):
 # 1. persistent copy outside scratch space
 git clone https://github.com/neronlux/yes-dev-linux.git ~/yes-dev-linux
 # 2. unit file at ~/.config/systemd/user/yes-dev.service:
-#    ExecStart=/usr/bin/python3 /home/USER/yes-dev-linux/watcher_linux.py --observe
+#    ExecStart=/usr/bin/python3 /home/USER/yes-dev-linux/watcher_linux.py --enable-click
 systemctl --user daemon-reload
 systemctl --user enable --now yes-dev.service
 # 3. reboot survival needs lingering (usually already on):
@@ -160,45 +187,63 @@ Notes:
 ## Read this before anything else
 
 The prompt exists to stop a malicious local program from seizing your
-signed-in browser. This port does not auto-approve on Wayland (nothing
-reaches the bubble — proven, see TESTING.md), so it cannot reduce your
-protection today; it watches and logs. If a future stack exposes the
-button, the AT-SPI path approves with the same two mitigations upstream
-ships in its tray (stay-on window, burst guard — minimal silent versions
-here), so:
+signed-in browser. Auto-approving means **any** local process that attaches
+gets in, not just the ones you started — that is the trade this tool makes,
+the same one upstream's tray makes. This port ships with:
 
-- run `--observe` first and capture a live prompt with `--probe`,
-- prefer a throwaway `--user-data-dir` profile wherever you do not need
-  real browser state.
+- `--enable-click` off by default, and `--observe` always wins over it;
+- a burst guard (pause clicks 60s after 60 approvals/min, same default as
+  upstream);
+- at most 3 click attempts per bubble, then it waits for the bubble to
+  clear rather than hammering;
+- a click that only ever fires on a button found in a live screenshot,
+  so an occluded or unexpected dialog is left untouched.
+
+Run `--observe` first, and prefer a throwaway `--user-data-dir` profile
+wherever you do not need real browser state.
 
 ## Known limitations
 
-- **No synthetic activation on Wayland** (verdict, not gap): AT-SPI
-  exposes zero objects (Collection: zero buttons), uinput pointer clicks
-  land everywhere except the secure bubble, blind Enter risks Turn-off
-  (focus is unpredictable), and rescan-absence can't tell approval from
-  withdraw. The engine is an honest watchdog until that changes.
+- **Visual button detection**: the Allow button must appear as one of two
+  blue buttons side by side in the lower half of the screenshot (Chrome
+  153 dark theme, measured). A drastically restyled dialog, a very light
+  theme, or a localised Chrome may not match — then the engine logs
+  `Allow button not found` and leaves the bubble. Calibrate with
+  `auto_click.py --detect shot.png` on a real prompt.
+- **Invisible-snapshot race**: the first click is occasionally swallowed
+  while the bubble animates in; the engine retries after ~1s. A bubble
+  that survives 3 attempts is left until it clears.
 - **English Chrome only** (same as upstream): matched by title string —
   but `--dialog-pattern`/`--approve-pattern` are exposed flags, so a
   localised build can be attempted without code changes.
 - No tray, no stay-on timer, no ask-first burst dialog yet. The engine
   refuses double-run via the lock and `--exit-with-parent` is available
   for supervised launches.
+- Untested: a bubble on a non-focused Chrome window (clicks here were
+  verified with Chrome focused). The screenshot search would still find
+  the buttons only if the dialog is visible.
 
 ## Contributing captures
 
 Hit a real prompt? While it is up, run
-`/usr/bin/python3 watcher_linux.py --probe` and open an issue with the
-(redacted) output — that is how the click path gets proven. Reliable
-trigger: restart Chrome, then attach once via
-`npx -y chrome-devtools-mcp@latest --autoConnect` and call `list_pages`
-(the call hangs mid-handshake while the prompt is up).
+`/usr/bin/python3 auto_click.py --shot /tmp/shot.png` and
+`--detect /tmp/shot.png`, and open an issue with the result and your
+Chrome version — that is how new layouts get calibrated. Reliable
+trigger: attach once via `npx -y chrome-devtools-mcp@latest --autoConnect`
+and call `list_pages` (the call hangs mid-handshake while the prompt is up).
 
 ## History
 
-- **v0.6** — synthetic activation removed (verdict: nothing reaches the
-  secure Views bubble); honest watchdog (detect, log, count pending),
-  AT-SPI Action path retained for exposing stacks.
+- **v0.7** — auto-approval works end to end: portal screenshot → PIL finds
+  the Allow button → dedicated absolute uinput pointer clicks it →
+  verified by the window's child total returning to base → `[ACTION]`.
+  Retry model for swallowed first clicks; `--enable-click` arms it.
+  Supersedes the v0.6 "no synthetic activation" verdict — that verdict
+  was wrong: the failures were a relative input device (accel-warped)
+  plus coordinate arithmetic, not Chrome rejecting the input.
+- **v0.6** — synthetic activation removed (incorrectly concluded nothing
+  reaches the secure Views bubble); honest watchdog (detect, log, count
+  pending), AT-SPI Action path retained for exposing stacks.
 - **v0.5** — geometry-keyed bubble detection (survives tab-title churn).
 - **v0.4** — untitled-bubble detection via child-count bump.
 - **v0.3** — single-instance lock, minimal burst guard (`--burst-limit`),
