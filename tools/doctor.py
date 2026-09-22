@@ -7,14 +7,18 @@ found and the suggested next step per finding.
 
 Exit code is non-zero only when the service itself is not active.
 """
+import json
 import subprocess
 import sys
+import time
 import warnings
+from datetime import datetime
 from pathlib import Path
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 LOG = Path.home() / ".local/share/YesDev/yes-dev.log"
+STATE = Path.home() / ".local/share/YesDev/state.json"
 
 
 def sh(cmd, **kw):
@@ -55,6 +59,33 @@ add("engine log", "ok" if lines else "warn", last[-110:] if lines else "no log f
 standdown = next((l for l in reversed(lines) if "no Allow button visible" in l), None)
 raise_ = next((l for l in reversed(lines) if "raise the host window" in l), None)
 approved = next((l for l in reversed(lines) if "APPROVED" in l), None)
+
+# --- engine state file (v0.8.6+) ---------------------------------------------
+try:
+    state = json.loads(STATE.read_text())
+except Exception:
+    state = None
+if state:
+    try:
+        age = int(time.time() - datetime.fromisoformat(state["updated"]).timestamp())
+    except Exception:
+        age = -1
+    pend = state.get("pending") or []
+    ptr = state.get("pointer")
+    detail = (f"pid {state.get('pid')} approvals {state.get('approved_session')} "
+              f"pending {len(pend)} pointer {ptr['size'] if ptr else '-'} "
+              f"state age {age}s")
+    add("engine state", "ok" if 0 <= age <= 90 else "warn", detail,
+        None if 0 <= age <= 90 else "no fresh state - "
+        "check systemctl --user status yes-dev.service")
+    if state.get("last_action"):
+        add("last approval", "ok", state["last_action"], None)
+    if state.get("last_error"):
+        add("last error", "warn", state["last_error"],
+            "see the Troubleshooting playbook in the README")
+else:
+    add("engine state", "warn", "no state.json yet",
+        "written on the first sweep since v0.8.6 - restart the service once")
 
 # --- AT-SPI: chrome windows, bubbles, covering windows -----------------------
 try:

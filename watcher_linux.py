@@ -2,7 +2,7 @@
 """Yes, Dev engine for Linux: watch for Chrome's "Allow remote debugging?"
 consent dialog through AT-SPI.
 
-Status: v0.8.5. Detection via AT-SPI is proven live (titled dialogs by
+Status: v0.8.6. Detection via AT-SPI is proven live (titled dialogs by
 title, untitled Wayland bubbles by window-geometry child totals).
 Auto-approval works via a visual pipeline, proven end-to-end on
 2026-09-22: xdg-desktop-portal screenshot (no prompt) -> PIL finds the
@@ -19,6 +19,10 @@ down after 3 empty looks. Gates: --enable-click (off by default),
 --cool-off-s pause (default 30s) and a fresh pointer before the next
 cycle, and [ACTION] is logged only after verification. The AT-SPI
 Action path (below) still serves stacks that expose the button (X11).
+Approval is verified two ways (fresh screenshot or child total), the
+normalize ladder runs 3 rounds, stand-downs are reason-coded, and a
+state.json feeds tools/doctor.py; the edge-case matrix lives in
+TESTING.md.
 
 Boot-safe: the systemd user service starts before the desktop exists
 (linger + default.target), so every dependency is re-acquired lazily and
@@ -59,6 +63,7 @@ Requires the distro python (it ships python3-gi):
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -112,6 +117,7 @@ CLICK_MAX_ATTEMPTS = 3     # per cycle, then cool off and start a fresh one
 CLICK_RETRY_S = 1.0        # minimum gap between click attempts on one bubble
 CLICK_COOL_OFF_S = 30.0    # pause between attempt cycles (0 = wait for clear)
 NO_BUTTON_STOP = 3         # consecutive no-button looks before standing down
+NORMALIZE_ROUNDS = 3       # focus/maximize rounds per bubble before giving up
 CLICKER_RETRY_S = 15.0     # re-try clicker creation (boot order, RDP resize)
 ATSPI_REINIT_AFTER = 20    # consecutive failed scans before re-initialising
 
@@ -224,9 +230,18 @@ class Engine:
         self._click_attempts: dict[str, int] = {}
         self._click_last: dict[str, float] = {}
         self._clicker = None
+        self._clicker_created = 0.0
         self._clicker_retry_at = 0.0
         self._clicker_warned = False
         self._scan_errors = 0
+        self._norm_reason = ""
+        self._standdowns: deque[float] = deque()
+        self._last_hint = 0.0
+        self._started = time.time()
+        self._last_error = None
+        self._last_action = None
+        self._last_scan_ms = 0
+        self._last_state_write = 0.0
         self.approved = 0
         self._parent_pid = os.getppid()
         self._seen: dict[str, float] = {}
@@ -240,6 +255,10 @@ class Engine:
         now = datetime.now()
         stamp = now.strftime("%Y-%m-%d %H:%M:%S.") + f"{now.microsecond // 1000:03d}"
         line = f"{stamp} [{level}] {message}"
+        if level == "ERROR":
+            self._last_error = f"{stamp} {message[:160]}"
+        elif level == "ACTION":
+            self._last_action = f"{stamp} {message[:160]}"
         print(line, flush=True)
         try:
             ensure_data_dir()
@@ -418,6 +437,7 @@ class Engine:
             self._clicker_retry_at = now + CLICKER_RETRY_S
             return None
         self._clicker = clicker
+        self._clicker_created = time.time()
         self._clicker_warned = False
         self._clicker_retry_at = 0.0
         self.log(f"auto-click ready: absolute pointer {clicker.size}", "INFO")
@@ -550,9 +570,10 @@ class Engine:
         if auto_click is None:
             return None
         n = self._normalized.get(dkey, 0)
-        if n >= 2:
+        if n >= NORMALIZE_ROUNDS:
             return None
         self._normalized[dkey] = n + 1
+        self._norm_reason = "no-visible-button"
 
         act = self._active_chrome_frame()
         if act is None:
@@ -561,6 +582,7 @@ class Engine:
             act = self._active_chrome_frame()
         clicker = self._get_clicker(None)
         if clicker is None:
+            self._norm_reason = "pointer-unavailable"
             return None
         k = 1
         while act is None and k <= 3:
@@ -569,6 +591,7 @@ class Engine:
             act = self._active_chrome_frame()
             k += 1
         if act is None:
+            self._norm_reason = "no-focus"
             self.log("  could not bring Chrome to the front (no focus within "
                      "reach); leaving this bubble alone", "WARN")
             return None
@@ -616,6 +639,52 @@ class Engine:
         self._nobutton.pop(old, None)
         self._raised.discard(old)
         self._normalized[new] = self._normalized.pop(old, 0)
+
+    def _stuck_hint_due(self, now: float) -> bool:
+        """True at most once per 10 min, and only when stand-downs are
+        clustering - the known stuck-consent-queue signature."""
+        self._standdowns.append(now)
+        while self._standdowns and now - self._standdowns[0] > 600:
+            self._standdowns.popleft()
+        if len(self._standdowns) >= 3 and now - self._last_hint > 600:
+            self._last_hint = now
+            return True
+        return False
+
+    def _write_state(self, now: float) -> None:
+        """Machine-readable health snapshot for tools/doctor.py (throttled
+        to ~5s, atomic replace)."""
+        if now - self._last_state_write < 5.0:
+            return
+        self._last_state_write = now
+        try:
+            clicker = None
+            if self._clicker is not None:
+                clicker = {"size": list(self._clicker.size),
+                           "age_s": int(now - self._clicker_created)}
+            state = {
+                "pid": os.getpid(),
+                "started": datetime.fromtimestamp(self._started).isoformat(timespec="seconds"),
+                "updated": datetime.now().isoformat(timespec="seconds"),
+                "observe": self.observe,
+                "enable_click": self.enable_click,
+                "approved_session": self.approved,
+                "pointer": clicker,
+                "pending": [{"key": k,
+                             "attempts": self._click_attempts.get(k, 0),
+                             "normalize_rounds": self._normalized.get(k, 0),
+                             "no_button_looks": self._nobutton.get(k, 0)}
+                            for k in self._pending],
+                "last_scan_ms": self._last_scan_ms,
+                "last_error": self._last_error,
+                "last_action": self._last_action,
+            }
+            path = Path(DATA_DIR) / "state.json"
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(json.dumps(state, indent=1) + "\n", encoding="utf-8")
+            tmp.replace(path)
+        except Exception:
+            pass
 
     def _note_scan(self, ok: bool) -> None:
         """Re-init AT-SPI after a run of failures: at boot the a11y bus can
@@ -675,16 +744,25 @@ class Engine:
             after = auto_click._portal_screenshot()
         except Exception:
             after = None
-        if after and auto_click.find_allow_button(after) is None:
-            # Visual verify: the button is gone -> the bubble is dismissed.
-            try:
-                key = tuple(dkey.split(":", 2)[1:])  # "bubble:<app>:<rect>"
-                e = self._rect_snapshot().get((key[0], key[1]))
-                if e is not None and e["total"] > baseline:
-                    self.log("  (child total still elevated - queued attaches "
-                             "leak nodes; visual verify says gone)", "INFO")
-            except Exception:
-                pass
+        vis_gone = after is not None and auto_click.find_allow_button(after) is None
+        tot_gone = False
+        try:
+            key = tuple(dkey.split(":", 2)[1:])  # "bubble:<app>:<rect>"
+            e = self._rect_snapshot().get((key[0], key[1]))
+            tot_gone = e is None or e["total"] <= baseline
+        except Exception:
+            pass
+        if vis_gone or tot_gone:
+            # Either signal is enough: screenshots can lag a frame, and
+            # queued attaches can keep the child total elevated after the
+            # bubble is gone (both observed live). Disagreements are noted
+            # instead of stalling the loop.
+            if vis_gone and not tot_gone:
+                self.log("  (child total still elevated - queued attaches leak "
+                         "nodes; visual verify says gone)", "INFO")
+            if tot_gone and not vis_gone:
+                self.log("  (screenshot still shows the button but the child "
+                         "total dropped - screenshot lag; accepting)", "INFO")
             return "approved", f"abs-pointer click {pt}"
         return "failed", None
 
@@ -741,6 +819,7 @@ class Engine:
             self.log(f"scan error: {exc!r}", "ERROR")
             self._note_scan(False)
             hosts = []
+        self._last_scan_ms = int((time.monotonic() - t0) * 1000)
         if diag_sweep:
             ms = int((time.monotonic() - t0) * 1000)
             self.log(f"diagnostic scan hosts={len(hosts)} ({ms}ms) {' '.join(diag or [])}", "DIAG")
@@ -895,8 +974,16 @@ class Engine:
                         self._raised.discard(dkey)
                         self.log("  retrying on the re-focused window", "INFO")
                     else:
-                        self.log(f"  no Allow button visible {nb}x - leaving this window "
-                                 f"alone (a new child bump re-arms)", "WARN")
+                        reason = self._norm_reason or "no-visible-button"
+                        self.log(f"  giving up on this bubble after "
+                                 f"{NORMALIZE_ROUNDS} normalize rounds - "
+                                 f"reason={reason}; a new child bump re-arms",
+                                 "WARN")
+                        if self._stuck_hint_due(now):
+                            self.log("  if sessions stay blocked, the browser's consent "
+                                     "queue may be stuck: toggle remote debugging OFF/ON "
+                                     "at chrome://inspect/#remote-debugging (or restart "
+                                     "Chrome)", "WARN")
                         self._pending.pop(dkey, None)
                         self._click_attempts.pop(dkey, None)
                         self._cycle_next.pop(dkey, None)
@@ -954,6 +1041,7 @@ class Engine:
         if len(self._rects) > DEDUPE_MAX:
             for s in list(self._rects)[:len(self._rects) - DEDUPE_MAX]:
                 del self._rects[s]
+        self._write_state(now)
 
     def probe(self):
         """Dump the AT-SPI tree around Chrome for porting work. No clicks."""

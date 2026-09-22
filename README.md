@@ -252,6 +252,10 @@ then prints the suggested next step:
 /usr/bin/python3 tools/doctor.py
 ```
 
+Every sweep also writes `~/.local/share/YesDev/state.json` (pid,
+approvals, pointer age, pending bubbles, last error and last action) -
+`doctor` prints it, scripts can read it directly.
+
 Manual playbook, in escalation order (all of it was walked through live
 in TESTING.md's v0.8.3 field notes):
 
@@ -366,6 +370,17 @@ the call hangs mid-handshake while the prompt is up).
 
 ## History
 
+- **v0.8.6** — loop hardening: two-way verification (either the fresh
+  screenshot no longer showing the button *or* the child total dropping
+  counts as approved - kills screenshot-lag false negatives); the
+  normalize ladder runs 3 rounds including Super+` same-app cycling;
+  reason-coded stand-downs (`reason=no-focus`, `no-visible-button`,
+  `pointer-unavailable`) with a stuck-queue remedy hint after clustered
+  stand-downs; a machine-readable `state.json` (pid, approvals, pointer
+  age, pending bubbles and their stage, last error/action, scan time)
+  that `tools/doctor.py` surfaces. The full edge-case matrix - 24
+  conditions with detection, automatic response and residual - is in
+  TESTING.md.
 - **v0.8.5** — "force Chrome to the front and full screen, then click":
   when the bubble is not visible the engine normalizes the window —
   uncovered-corner raise, held-Alt MRU focus walk (single Alt+Tabs

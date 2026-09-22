@@ -265,6 +265,45 @@ the live probing proved:
   needed" (guard), "Chrome focused - sent Super+Up" (focus path), and
   "following the bubble to ..." (migration) all fired in real runs.
 
+## Edge-case matrix (v0.8.6)
+
+Every known failure mode, how it is detected and what happens
+automatically. The residual column is what is left for a human. Update
+this table whenever behaviour changes — it is the completeness check
+for the loop.
+
+| # | Condition | Detection | Automatic response | Residual |
+|---|---|---|---|---|
+| 1 | Titled dialog (X11/exposing stacks) | title regex | AT-SPI Action press + ref-identity verify | - |
+| 2 | Untitled Wayland bubble | child-total bump | geometry-keyed candidate | - |
+| 3 | Host window inactive | AT-SPI ACTIVE check | raise click -> held-Alt MRU walk -> Super+Up | - |
+| 4 | Host covered by another app | button not in screenshot | normalize rounds (3), incl. Super+` same-app cycling | stand-down + toggle hint if clustered |
+| 5 | Half-tiled / toggle maximize mid-state | area shrinks after Super+Up | verify area, press again | - |
+| 6 | Multiple Chrome windows | host != active window | Super+` in rounds 2+, migration by elevated total | - |
+| 7 | Window moved / resized mid-bubble | rect key vanishes, elevated rect appears | migration follows the elevated total | - |
+| 8 | First click swallowed (focus/animation) | fresh screenshot still shows button | retry, 1s gap, 3 attempts | cool-off cycle |
+| 9 | All clicks swallowed | cycle exhausted | pointer device dropped, 30s cool-off, fresh cycle | - |
+| 10 | Child totals leak (killed clients) | visual gone, total elevated | visual verify accepts + INFO note | - |
+| 11 | Screenshot lag after click | total dropped, visual shows button | totals verify accepts + INFO note | - |
+| 12 | Phantom bubble (total elevated, nothing renders) | 3 no-button looks | normalize rounds, then stand-down | - |
+| 13 | Stuck consent queue (browser-side) | >=3 stand-downs in 10 min | stuck-queue remedy logged | toggle remote debugging / restart Chrome |
+| 14 | Bubble on another workspace | no-focus after MRU walk | stand-down, reason=no-focus | switch to the window manually |
+| 15 | Chrome not running / port closed | no candidates at all | engine silent | start Chrome; doctor flags it |
+| 16 | Consent gate burned (dismissed) | attaches fast-fail | engine silent | toggle remote debugging |
+| 17 | RDP resize mid-session | screenshot size change | pointer rebuilt at the new size | - |
+| 18 | Service starts before desktop | clicker/portal/AT-SPI unavailable | lazy 15s retry; AT-SPI re-init after 20 fails | - |
+| 19 | Portal screenshot fails | screenshot returns None | warn, skip raise, retry next sweep | check xdg-desktop-portal |
+| 20 | /dev/uinput unavailable | clicker creation fails | warn once, retry every 15s | udev rule + input group |
+| 21 | Approval burst | >limit/min | burst guard pauses 60s | tune --burst-limit |
+| 22 | Double-start | lock file | second engine exits | - |
+| 23 | Stale frame in verify | signals disagree | either signal accepts; disagreement logged | read the INFO note |
+| 24 | Restyled / localised button | finder returns None | normalize ladder, stand-down with reason | calibrate with --detect, open an issue |
+
+The engine writes `~/.local/share/YesDev/state.json` every ~5s (pid,
+approvals, pointer age, pending bubbles with attempts/normalize rounds,
+last error/action, scan ms) - `tools/doctor.py` prints it, scripts can
+read it directly.
+
 ## Stage 3 — fresh prompt (needs a Chrome restart)
 
 Consent resets on restart. This kills the main browser (tabs restore;
