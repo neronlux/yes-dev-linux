@@ -142,3 +142,19 @@ at `chrome://inspect/#remote-debugging`, then retry Stage 1.
 - The hung MCP call answers within ~1s of the log line.
 - `--probe` during a later hang shows the same count-bump shape, served
   next sweep (dedupe) — i.e. N queued prompts approved one per sweep.
+
+## End-to-end proof, 2026-09-22 (v0.6 watchdog + human click)
+
+Proven with a live client (600s window so the click lands while alive):
+
+1. Trigger attach → call hangs mid-handshake.
+2. Engine logs `untitled bubble candidate (chrome) window=0,0,1213x768
+   children 2->3 ... left for human click`, screenshot confirms the
+   dialog on screen.
+3. Human clicks **Allow** with a real mouse.
+4. The hung call **RESPONDS** (`## Pages ...`, 55.5s in) — grant works.
+5. Frame child count returns to baseline 1, toggle intact.
+
+Lesson: approving a DEAD client's prompt grants nothing — the click must
+land while its client is still waiting. Earlier "no grant" results were
+all expired-window artifacts, not approval failures.
