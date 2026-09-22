@@ -396,6 +396,11 @@ the call hangs mid-handshake while the prompt is up).
 
 ## History
 
+- **v0.8.13** — hygiene release: GitHub "Calibration capture" issue
+  template (cluster data, --detect output, environment, screenshot) so
+  restyle reports arrive in a usable shape; .editorconfig; brew caveats
+  now lead with the `--selftest` verification step. Engine unchanged
+  since v0.8.12.
 - **v0.8.12** — cheap-win batch: the visual backstop gains unit tests
   (region prior + candidate creation), a late child bump for a bubble a
   visual candidate already owns is ignored (no double-serve), observe

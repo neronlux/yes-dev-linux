@@ -1,0 +1,38 @@
+name: Calibration capture
+description: An Allow dialog the button finder missed (restyle, theme or locale)
+title: "calibration: "
+labels: ["calibration"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A real prompt the finder did not recognise is the single most useful
+        thing you can contribute. Capture it while the dialog is up:
+        `auto_click.py --shot /tmp/shot.png` then `auto_click.py --clusters /tmp/shot.png`
+  - type: textarea
+    id: clusters
+    attributes:
+      label: Cluster data (auto_click.py --clusters shot.png)
+      description: One line per cluster found (or "no clusters").
+    validations:
+      required: true
+  - type: textarea
+    id: detect
+    attributes:
+      label: --detect output (auto_click.py --detect shot.png)
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Chrome version, desktop theme (dark/light), UI locale, compositor (GNOME/KDE/...).
+    validations:
+      required: true
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: Screenshot (crop personal content first)
+      description: Optional but the fastest way for us to recalibrate.
+    validations:
+      required: false

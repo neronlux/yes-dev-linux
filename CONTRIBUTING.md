@@ -95,9 +95,9 @@ while the bubble is **up**:
 /usr/bin/python3 auto_click.py --detect /tmp/shot.png   # prints (x, y) or None
 ```
 
-Open an issue with: the screenshot (crop personal content), the
-`--detect` output, and your Chrome version, locale, and desktop
-theme. `None` from `--detect` is exactly the data we need to extend the
+Open an issue with the **Calibration capture** template: cluster data
+(`auto_click.py --clusters shot.png`), `--detect` output, Chrome
+version, locale, and desktop theme — the form walks you through it. `None` from `--detect` is exactly the data we need to extend the
 finder (see `find_allow_button` in `auto_click.py`: blue-fill clusters,
 two side-by-side buttons, rightmost = Allow).
 
