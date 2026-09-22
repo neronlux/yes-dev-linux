@@ -164,6 +164,7 @@ brew install yes-dev-linux
 | `--approve-pattern` | Button label regex (default `^(allow\|approve)$`). Anchored so *Turn off in settings* is never hit. |
 | `--burst-limit` | Pause clicks 60s after this many approvals/min (default 60, `0` disables). Same default as upstream, measured not guessed. |
 | `--cool-off-s` | After 3 failed click attempts on one bubble, pause this long, then start a fresh 3-attempt cycle (default 30, `0` = old wait-forever). |
+| `--restart-chrome-on-stuck` | Opt-in: when clustered stand-downs suggest a stuck consent queue, restart the Chrome holding :9222 (tabs restore) once per 30 min. Off by default — disruptive. |
 | `--exit-with-parent` | Exit when the launching process goes away (for supervised runs). |
 | `--diagnostics` | Log scan timing every 5s. |
 | `--log-path` | Default `~/.local/share/YesDev/yes-dev.log`. |
@@ -244,9 +245,10 @@ Notes:
 ## Troubleshooting & recovery
 
 One-shot health check — read-only, safe any time, works beside the
-service. It reports the service, Chrome's debug port, AT-SPI visibility,
-windows covering Chrome, stray clients and the engine's last actions,
-then prints the suggested next step:
+service. It reports the service, Chrome's debug port, `/dev/uinput` and
+the portal, lock state, AT-SPI visibility, windows covering Chrome,
+stray clients, the engine's live state file, and its last actions, then
+prints the suggested next step:
 
 ```bash
 /usr/bin/python3 tools/doctor.py
@@ -318,7 +320,11 @@ the same one upstream's tray makes. This port ships with:
   one uncovered-corner click per bubble to raise a covered host window;
 - synthetic keyboard used only for window management (Super+Up maximize,
   Alt+Tab / Super+` focus walking), never before AT-SPI proves a Chrome
-  window is active, and never to drive the dialog itself.
+  window is active, and never to drive the dialog itself;
+- clicks pause entirely while the session is locked;
+- the only automation that kills anything is `--restart-chrome-on-stuck`,
+  off by default, rate-limited to once per 30 min, and it logs loudly
+  before terminating the browser (tabs restore).
 
 Run `--observe` first, and prefer a throwaway `--user-data-dir` profile
 wherever you do not need real browser state.
@@ -370,6 +376,13 @@ the call hangs mid-handshake while the prompt is up).
 
 ## History
 
+- **v0.8.7** — operator-visible edges: the engine pauses all clicking
+  while the session is locked (org.gnome.ScreenSaver, cached 5s) and
+  logs it once a minute; `tools/doctor.py` now also checks
+  `/dev/uinput` writability, the xdg-desktop-portal backend, and the
+  lock state; and an opt-in `--restart-chrome-on-stuck` turns the stuck-
+  queue hint into an action (restarts the Chrome holding :9222, tabs
+  restore, once per 30 min). Edge-case matrix gains row 25 (locked).
 - **v0.8.6** — loop hardening: two-way verification (either the fresh
   screenshot no longer showing the button *or* the child total dropping
   counts as approved - kills screenshot-lag false negatives); the

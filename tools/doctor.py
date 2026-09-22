@@ -8,6 +8,7 @@ found and the suggested next step per finding.
 Exit code is non-zero only when the service itself is not active.
 """
 import json
+import os
 import subprocess
 import sys
 import time
@@ -47,6 +48,30 @@ add("chrome debug port", "ok" if listening else "warn",
     "listening on 9222" if listening else "not listening",
     None if listening else "open chrome://inspect/#remote-debugging and toggle "
                             "remote debugging ON (a restart needs the toggle re-armed)")
+
+# --- input + portal prerequisites -------------------------------------------
+uinput = os.access("/dev/uinput", os.W_OK)
+add("uinput pointer", "ok" if uinput else "warn",
+    "writable" if uinput else "/dev/uinput is not writable",
+    None if uinput else 'udev rule KERNEL=="uinput", MODE="0660", GROUP="input" '
+                        "+ membership in the input group")
+
+portal_pids = sh(["pgrep", "-f", "xdg-desktop-portal"]).split()
+backends = sh(["pgrep", "-af", "xdg-desktop-portal-"])
+backend = ("gnome" if "-gnome" in backends else "gtk" if "-gtk" in backends else
+           "generic")
+add("xdg-desktop-portal", "ok" if portal_pids else "warn",
+    f"running ({backend} backend)" if portal_pids else "not running",
+    None if portal_pids else "start xdg-desktop-portal (screenshots need it)")
+
+sc = sh(["gdbus", "call", "--session", "--dest", "org.gnome.ScreenSaver",
+         "--object-path", "/org/gnome/ScreenSaver",
+         "--method", "org.gnome.ScreenSaver.GetActive"]).strip()
+if sc:
+    locked = "true" in sc
+    add("screen", "warn" if locked else "ok",
+        "LOCKED - approvals wait for unlock" if locked else "unlocked",
+        "unlock the session; the engine skips clicks while locked" if locked else None)
 
 # --- engine log -------------------------------------------------------------
 lines = []

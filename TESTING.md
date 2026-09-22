@@ -286,7 +286,7 @@ for the loop.
 | 10 | Child totals leak (killed clients) | visual gone, total elevated | visual verify accepts + INFO note | - |
 | 11 | Screenshot lag after click | total dropped, visual shows button | totals verify accepts + INFO note | - |
 | 12 | Phantom bubble (total elevated, nothing renders) | 3 no-button looks | normalize rounds, then stand-down | - |
-| 13 | Stuck consent queue (browser-side) | >=3 stand-downs in 10 min | stuck-queue remedy logged | toggle remote debugging / restart Chrome |
+| 13 | Stuck consent queue (browser-side) | >=3 stand-downs in 10 min | stuck-queue remedy logged; `--restart-chrome-on-stuck` restarts Chrome (once/30min, opt-in) | toggle remote debugging / restart Chrome |
 | 14 | Bubble on another workspace | no-focus after MRU walk | stand-down, reason=no-focus | switch to the window manually |
 | 15 | Chrome not running / port closed | no candidates at all | engine silent | start Chrome; doctor flags it |
 | 16 | Consent gate burned (dismissed) | attaches fast-fail | engine silent | toggle remote debugging |
@@ -298,6 +298,7 @@ for the loop.
 | 22 | Double-start | lock file | second engine exits | - |
 | 23 | Stale frame in verify | signals disagree | either signal accepts; disagreement logged | read the INFO note |
 | 24 | Restyled / localised button | finder returns None | normalize ladder, stand-down with reason | calibrate with --detect, open an issue |
+| 25 | Session locked | org.gnome.ScreenSaver GetActive (cached 5s) | clicks pause, pending waits, logged once/min | unlock; the bubble is handled right after (if its client is still waiting) |
 
 The engine writes `~/.local/share/YesDev/state.json` every ~5s (pid,
 approvals, pointer age, pending bubbles with attempts/normalize rounds,

@@ -2,7 +2,7 @@
 """Yes, Dev engine for Linux: watch for Chrome's "Allow remote debugging?"
 consent dialog through AT-SPI.
 
-Status: v0.8.6. Detection via AT-SPI is proven live (titled dialogs by
+Status: v0.8.7. Detection via AT-SPI is proven live (titled dialogs by
 title, untitled Wayland bubbles by window-geometry child totals).
 Auto-approval works via a visual pipeline, proven end-to-end on
 2026-09-22: xdg-desktop-portal screenshot (no prompt) -> PIL finds the
@@ -22,7 +22,8 @@ Action path (below) still serves stacks that expose the button (X11).
 Approval is verified two ways (fresh screenshot or child total), the
 normalize ladder runs 3 rounds, stand-downs are reason-coded, and a
 state.json feeds tools/doctor.py; the edge-case matrix lives in
-TESTING.md.
+TESTING.md. Clicks pause while the session is locked, and an opt-in
+--restart-chrome-on-stuck turns the stuck-queue hint into a restart.
 
 Boot-safe: the systemd user service starts before the desktop exists
 (linger + default.target), so every dependency is re-acquired lazily and
@@ -66,6 +67,8 @@ import argparse
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
 from collections import deque
@@ -118,6 +121,8 @@ CLICK_RETRY_S = 1.0        # minimum gap between click attempts on one bubble
 CLICK_COOL_OFF_S = 30.0    # pause between attempt cycles (0 = wait for clear)
 NO_BUTTON_STOP = 3         # consecutive no-button looks before standing down
 NORMALIZE_ROUNDS = 3       # focus/maximize rounds per bubble before giving up
+LOCK_CACHE_S = 5           # how long a lock-state reading is trusted
+CHROME_RESTART_COOLDOWN_S = 1800  # opt-in restart: at most once per 30 min
 CLICKER_RETRY_S = 15.0     # re-try clicker creation (boot order, RDP resize)
 ATSPI_REINIT_AFTER = 20    # consecutive failed scans before re-initialising
 
@@ -207,7 +212,7 @@ class Engine:
                  exit_with_parent=False, diagnostics=False,
                  dialog_pattern=DIALOG_PATTERN, approve_pattern=APPROVE_PATTERN,
                  burst_limit=BURST_LIMIT_DEFAULT, enable_click=False,
-                 cool_off_s=CLICK_COOL_OFF_S):
+                 cool_off_s=CLICK_COOL_OFF_S, restart_chrome_on_stuck=False):
         self.observe = observe
         self.poll_s = max(0.05, poll_ms / 1000.0)
         self.include_edge = include_edge
@@ -242,6 +247,11 @@ class Engine:
         self._last_action = None
         self._last_scan_ms = 0
         self._last_state_write = 0.0
+        self._locked_checked = 0.0
+        self._locked_state = False
+        self._last_locked_log = 0.0
+        self.restart_chrome_on_stuck = restart_chrome_on_stuck
+        self._last_chrome_restart = 0.0
         self.approved = 0
         self._parent_pid = os.getppid()
         self._seen: dict[str, float] = {}
@@ -640,6 +650,89 @@ class Engine:
         self._raised.discard(old)
         self._normalized[new] = self._normalized.pop(old, 0)
 
+    def _locked(self) -> bool:
+        """True while the session is locked (org.gnome.ScreenSaver), cached
+        ~5s. Clicks are pointless and risky on a lock screen, so the serve
+        loop waits instead of burning attempts."""
+        now = time.time()
+        if now - self._locked_checked < LOCK_CACHE_S:
+            return self._locked_state
+        self._locked_checked = now
+        try:
+            out = subprocess.run(
+                ["gdbus", "call", "--session", "--dest", "org.gnome.ScreenSaver",
+                 "--object-path", "/org/gnome/ScreenSaver",
+                 "--method", "org.gnome.ScreenSaver.GetActive"],
+                capture_output=True, text=True, timeout=5).stdout
+            self._locked_state = "true" in out
+        except Exception:
+            self._locked_state = False
+        return self._locked_state
+
+    def _port_open(self) -> bool:
+        try:
+            return ":9222" in subprocess.run(
+                ["ss", "-tlnp"], capture_output=True, text=True,
+                timeout=10).stdout
+        except Exception:
+            return False
+
+    def _restart_chrome(self, now: float) -> None:
+        """Opt-in (--restart-chrome-on-stuck): restart the Chrome that
+        holds the debug port so a stuck consent queue clears. Tabs
+        restore; rate-limited to once per 30 minutes."""
+        if now - self._last_chrome_restart < CHROME_RESTART_COOLDOWN_S:
+            self.log("  chrome restart already attempted recently - not repeating", "WARN")
+            return
+        self._last_chrome_restart = now
+        try:
+            ss = subprocess.run(["ss", "-tlnp"], capture_output=True, text=True,
+                                timeout=10).stdout
+            pid = None
+            for line in ss.splitlines():
+                if ":9222" in line and "pid=" in line:
+                    m = re.search(r"pid=(\d+)", line)
+                    if m:
+                        pid = int(m.group(1))
+                        break
+            if pid is None:
+                self.log("  chrome restart skipped: no process holds :9222", "WARN")
+                return
+            self.log(f"  restart-chrome-on-stuck: terminating Chrome pid {pid} "
+                     f"(tabs will restore)", "WARN")
+            subprocess.run(["kill", "-TERM", str(pid)], timeout=10)
+            for _ in range(30):
+                time.sleep(1)
+                if not self._port_open():
+                    break
+            uid = os.getuid()
+            wl = "wayland-0"
+            try:
+                cands = sorted(p.name for p in Path(f"/run/user/{uid}").glob("wayland-*")
+                               if not p.name.endswith(".lock"))
+                if cands:
+                    wl = cands[0]
+            except Exception:
+                pass
+            binary = (shutil.which("google-chrome") or shutil.which("google-chrome-stable")
+                      or "/usr/bin/google-chrome")
+            subprocess.Popen(
+                ["setsid", "-f", "env",
+                 f"XDG_RUNTIME_DIR=/run/user/{uid}", f"WAYLAND_DISPLAY={wl}",
+                 f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
+                 binary, "--ozone-platform=wayland", "--restore-last-session"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True)
+            for _ in range(30):
+                time.sleep(1)
+                if self._port_open():
+                    self.log("  chrome restart: debug port is back; the next attach "
+                             "will prompt", "INFO")
+                    return
+            self.log("  chrome restart: debug port did not return within 30s", "ERROR")
+        except Exception as exc:
+            self.log(f"  chrome restart failed: {exc!r}", "ERROR")
+
     def _stuck_hint_due(self, now: float) -> bool:
         """True at most once per 10 min, and only when stand-downs are
         clustering - the known stuck-consent-queue signature."""
@@ -916,6 +1009,12 @@ class Engine:
         for dkey, base in list(self._pending.items()):
             if self.observe or not self.enable_click:
                 continue
+            if self._locked():
+                if now - self._last_locked_log > 60:
+                    self._last_locked_log = now
+                    self.log("  session is locked - waiting for unlock before "
+                             "clicking", "WARN")
+                continue
             attempts = self._click_attempts.get(dkey, 0)
             if attempts >= CLICK_MAX_ATTEMPTS:
                 # Cycle exhausted. Cool off, then start a fresh cycle - a
@@ -981,9 +1080,14 @@ class Engine:
                                  "WARN")
                         if self._stuck_hint_due(now):
                             self.log("  if sessions stay blocked, the browser's consent "
-                                     "queue may be stuck: toggle remote debugging OFF/ON "
-                                     "at chrome://inspect/#remote-debugging (or restart "
-                                     "Chrome)", "WARN")
+                                     "queue may be stuck", "WARN")
+                            if self.restart_chrome_on_stuck:
+                                self._restart_chrome(now)
+                            else:
+                                self.log("  remedy: toggle remote debugging OFF/ON at "
+                                         "chrome://inspect/#remote-debugging, restart "
+                                         "Chrome, or rerun with --restart-chrome-on-stuck",
+                                         "WARN")
                         self._pending.pop(dkey, None)
                         self._click_attempts.pop(dkey, None)
                         self._cycle_next.pop(dkey, None)
@@ -1101,6 +1205,10 @@ def main(argv=None):
     ap.add_argument("--burst-limit", type=int, default=BURST_LIMIT_DEFAULT,
                     help="pause approvals for 60s after this many in a "
                          "minute (0 disables; default 60, same as upstream)")
+    ap.add_argument("--restart-chrome-on-stuck", action="store_true",
+                    help="if the consent queue looks stuck (cluster of stand-downs), "
+                         "restart the Chrome holding :9222 once per 30 min; tabs "
+                         "restore. Off by default: disruptive")
     ap.add_argument("--cool-off-s", type=float, default=CLICK_COOL_OFF_S,
                     help="pause between click cycles after 3 failed attempts "
                          "on one bubble, then a fresh cycle starts (0 = old "
@@ -1116,6 +1224,7 @@ def main(argv=None):
                     dialog_pattern=re.compile(args.dialog_pattern, re.I),
                     approve_pattern=re.compile(args.approve_pattern, re.I),
                     cool_off_s=args.cool_off_s,
+                    restart_chrome_on_stuck=args.restart_chrome_on_stuck,
                     burst_limit=args.burst_limit,
                     enable_click=args.enable_click)
     if args.probe:
