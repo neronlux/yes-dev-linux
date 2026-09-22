@@ -84,6 +84,30 @@ screenshot of every Chrome window. Compare against the no-prompt baseline
   held the single-instance lock, crash-looping the service (NRestarts=3).
   Always `ps | grep watcher_linux` before blaming the service; use
   `--once`/`--probe` beside a running service, never a second loop.
+**Field notes, part 3 — activation wall (same day, ctd.):**
+
+- Pointer delivery PROVEN on shell UI (Activities overview toggle,
+  calendar popup) in backend coordinate space — but ~10 aimed clicks on
+  the bubble (incl. pixel-measured Allow at desktop (856,342) from a 1:1
+  window shot) changed nothing. uinput button events appear to be
+  swallowed/ignored on the secure Views bubble. (Upstream macOS notes the
+  same class of finding: cursorless synthetic clicks ignored.)
+- Keyboard: `Tab` focus-walk unverified (focus-ring readings at small
+  scales proved unreliable — identical-byte screenshots), `Space`/`Enter`
+  on Allow no effect, `Alt+A` nothing, `Escape` dismisses the WHOLE queue
+  and burns the grant (re-toggle required).
+- AT-SPI Collection on the frame: zero `PUSH_BUTTON` matches;
+  `get_active_descendant` unimplemented by Chrome. No object path exists.
+- Coordinate traps mapped: AT-SPI extents (0,0) vs shell origin (67,32)
+  for the same window — always add the shell origin; screenshots come
+  scaled (note `scale`!) — always divide back to 1:1 before measuring.
+- Mouse accel was flipped `default`→`flat`→`default` during tests; ydotool
+  absolute moves need `flat`, restored after.
+- Net: detection shippable; activation on Wayland blocked on (a) real
+  pointer delivery to Views bubbles, or (b) focusing Allow by keyboard.
+  Next ideas, untested: `F6` pane-focus into the bubble, Alt-underline
+   mnemonics check, Chrome under XWayland (`--ozone-platform=x11`) where
+   Views AT-SPI exposure may be complete.
 - Keep stray `chrome-devtools-mcp` processes reaped
   (`pkill -f "[c]hrome-devtools-mcp"` — quoted to dodge self-match);
   35 orphans piled up during probing and muddy the water.
