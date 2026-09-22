@@ -84,6 +84,20 @@ try:
 except Exception:
     pass
 
+# --- postboot self-check ------------------------------------------------------
+POSTBOOT = Path.home() / ".local/share/YesDev/postboot.log"
+try:
+    if POSTBOOT.exists():
+        tail = POSTBOOT.read_text(errors="replace").splitlines()[-8:]
+        verdict = next((l for l in reversed(tail) if l.startswith("VERDICT")), "")
+        age = int(time.time() - POSTBOOT.stat().st_mtime)
+        add("postboot check", "ok" if "WORKS" in verdict else "warn",
+            f"last run {age // 3600}h{(age % 3600) // 60}m ago; "
+            f"{verdict or 'no verdict found'}",
+            None if "WORKS" in verdict else "inspect ~/.local/share/YesDev/postboot.log")
+except Exception:
+    pass
+
 # --- engine log -------------------------------------------------------------
 lines = []
 try:

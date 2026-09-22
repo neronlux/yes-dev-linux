@@ -283,7 +283,7 @@ by an offline test only, OPEN = designed-for but not exercised.
 | Window maximise toggle mid-state guarded + re-press | UNIT | area guard seen live; the re-press branch not hit |
 | Host-targeted Super+` cycling (active rect == tracked host) | LIVE | cycling ran; exact-match branch bounded |
 | Workspace hunt: bubble on ws2 found, clicked, restored | LIVE | 21:00 run, client unblocked 11.5s |
-| Child-bump aliasing (leak/clear race) -> visual backstop | LIVE | 21:09 backstop caught it ~2s after restart |
+| Child-bump aliasing (leak/clear race) -> visual backstop | LIVE + UNIT | 21:09 caught it ~2s after restart; unit test covers region prior + candidate creation |
 | Leaked child totals -> visual verify accepts + leak note | LIVE | leak note logged on several approvals |
 | Screenshot lag -> totals verify accepts | UNIT | two-way branch not distinctly observed |
 | RDP/desktop resize -> pointer rebuilt at new size | UNIT | no real logical size change occurred on this VM |

@@ -110,6 +110,21 @@ c6 = e._get_clicker((1280, 800))
 check("next get builds a fresh device",
       c6 is not None and c6 is not c5 and c6.size == (1280, 800))
 
+# 5. visual backstop: a button seen twice in the dialog region becomes a
+#    pending candidate; a point outside the region is ignored.
+w.auto_click._portal_screenshot = lambda: "/tmp/fake.png"
+w.auto_click.image_size = lambda p: (1280, 800)
+e._pending.clear()
+w.auto_click.find_allow_button = lambda p: (640, 400)   # centre, in region
+e._backstop_scan(time.time())
+check("backstop creates a visual candidate",
+      "bubble:chrome:visual" in e._pending)
+e._pending.clear()
+w.auto_click.find_allow_button = lambda p: (80, 60)     # top-left, out of region
+e._backstop_scan(time.time())
+check("backstop ignores out-of-region buttons",
+      "bubble:chrome:visual" not in e._pending)
+
 w.CLICKER_RETRY_S = saved_retry
 print(f"\n{'FAILURES: ' + ', '.join(failures) if failures else 'ALL PASS'}")
 sys.exit(1 if failures else 0)

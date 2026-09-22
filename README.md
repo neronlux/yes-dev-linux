@@ -245,7 +245,11 @@ tail -f ~/.local/share/YesDev/yes-dev.log      # "engine started ... (ready)"
 
 After an actual reboot, confirm in the log (within a minute of login):
 `engine started`, then `auto-click ready: absolute pointer (W, H)`, then
-`untitled bubble candidate` + `APPROVED` on the first attach.
+`untitled bubble candidate` + `APPROVED` on the first attach. A postboot
+self-check (`yes-dev-postboot.service`) also runs once per boot —
+relaunching Chrome with session restore if needed, firing a test attach
+and writing the verdict to `~/.local/share/YesDev/postboot.log`;
+`tools/doctor.py` surfaces the latest verdict.
 
 Notes:
 
@@ -392,6 +396,13 @@ the call hangs mid-handshake while the prompt is up).
 
 ## History
 
+- **v0.8.12** — cheap-win batch: the visual backstop gains unit tests
+  (region prior + candidate creation), a late child bump for a bubble a
+  visual candidate already owns is ignored (no double-serve), observe
+  mode logs backstop sightings (throttled, never clicks), the doctor
+  surfaces the latest postboot verdict (`postboot check` row), the
+  engine takes `--version`, and `tools/run-tests.sh` runs the compile
+  check plus both offline suites in one command.
 - **v0.8.11** — docs release: TESTING.md gains a "Verified use cases -
   live ledger" (every capability with an honest LIVE / UNIT / OPEN
   status and its evidence). Engine unchanged since v0.8.10.

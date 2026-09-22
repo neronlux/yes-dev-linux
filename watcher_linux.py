@@ -2,7 +2,7 @@
 """Yes, Dev engine for Linux: watch for Chrome's "Allow remote debugging?"
 consent dialog through AT-SPI.
 
-Status: v0.8.11. Detection via AT-SPI is proven live (titled dialogs by
+Status: v0.8.12. Detection via AT-SPI is proven live (titled dialogs by
 title, untitled Wayland bubbles by window-geometry child totals).
 Auto-approval works via a visual pipeline, proven end-to-end on
 2026-09-22: xdg-desktop-portal screenshot (no prompt) -> PIL finds the
@@ -104,6 +104,8 @@ except Exception:
         "    sudo apt install python3-gi gir1.2-atspi-2.0\n"
         "and run with the distro python: /usr/bin/python3 watcher_linux.py"
     )
+
+VERSION = "0.8.12"
 
 DIALOG_PATTERN = re.compile(r"^allow remote debugging\??$", re.I)
 APPROVE_PATTERN = re.compile(r"^(allow|approve)$", re.I)
@@ -266,6 +268,7 @@ class Engine:
         self._monitors_warned = False
         self.visual_backstop_s = visual_backstop_s
         self._last_backstop = 0.0
+        self._last_observe_backstop_log = 0.0
         try:
             import json as _json
             st = _json.loads((Path(DATA_DIR) / "state.json").read_text())
@@ -739,6 +742,12 @@ class Engine:
         pt2 = auto_click.find_allow_button(shot2) if shot2 else None
         if pt2 is None or abs(pt2[0] - pt[0]) > 10 or abs(pt2[1] - pt[1]) > 10:
             return
+        if self.observe:
+            if now - self._last_observe_backstop_log > 60:
+                self._last_observe_backstop_log = now
+                self.log(f"visual backstop (observe): Allow button on screen at "
+                         f"{pt2} - would click", "OBSERVE")
+            return
         dkey = "bubble:chrome:visual"
         if dkey in self._pending:
             return
@@ -1113,6 +1122,10 @@ class Engine:
                 continue
             # A bump happened. First time: record the base and announce.
             if dkey not in self._pending:
+                if any(k.endswith(":visual") for k in self._pending):
+                    self.log("  (child bump while a visual candidate is pending - "
+                             "ignoring the bump)", "INFO")
+                    continue
                 self._pending[dkey] = ptotal
                 self._click_attempts[dkey] = 0
                 self.log(f"untitled bubble candidate ({e['kind']}) window={key[1]} "
@@ -1282,9 +1295,9 @@ class Engine:
         if len(self._rects) > DEDUPE_MAX:
             for s in list(self._rects)[:len(self._rects) - DEDUPE_MAX]:
                 del self._rects[s]
-        if (self.enable_click and not self.observe and not self._pending
-                and self.visual_backstop_s > 0 and not self._locked()
-                and now - self._last_backstop >= self.visual_backstop_s):
+        if (self.visual_backstop_s > 0 and not self._locked()
+                and now - self._last_backstop >= self.visual_backstop_s
+                and (self.observe or (self.enable_click and not self._pending))):
             self._last_backstop = now
             self._backstop_scan(now)
         self._write_state(now)
@@ -1337,7 +1350,7 @@ def run_selftest() -> int:
     """End-to-end environment check: AT-SPI, portal screenshot, pointer
     device, and a real click-delivery probe (briefly opens and closes the
     clock popup). Friendly output; exit 0 when the stack works."""
-    print("yes-dev-linux selftest")
+    print(f"yes-dev-linux selftest (v{VERSION})")
     print("-" * 52)
     ok = True
     try:
@@ -1395,6 +1408,8 @@ def run_selftest() -> int:
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Yes, Dev Linux engine (AT-SPI)")
+    ap.add_argument("--version", action="version",
+                    version=f"yes-dev-linux {VERSION}")
     ap.add_argument("--observe", action="store_true", help="log dialogs, never click")
     ap.add_argument("--once", action="store_true", help="one sweep then exit")
     ap.add_argument("--probe", action="store_true", help="dump AT-SPI tree around Chrome, then exit")

@@ -59,8 +59,11 @@ Two layers, both documented in [TESTING.md](TESTING.md):
 1. **Offline (no desktop, no Chrome, safe anywhere):**
 
    ```bash
-   /usr/bin/python3 tests/test_selfheal.py     # 8 checks, exits non-zero on failure
+   tools/run-tests.sh                          # compile + both suites
    ```
+
+   (or run `tests/test_selfheal.py` / `tests/test_finder.py` directly;
+   both exit non-zero on failure)
 
    Covers the v0.8 self-healing: pointer retry (no latch), rebuild on
    size change, AT-SPI re-init after repeated failures. Run this before
@@ -134,8 +137,8 @@ rejected regardless of other merit:
 
 ## Release process (maintainers)
 
-1. Update the version note in the `watcher_linux.py` docstring and add
-   a History bullet in README.
+1. Bump `VERSION` and the `Status:` note in the `watcher_linux.py`
+   docstring, and add a History bullet in README.
 2. Run `tests/test_selfheal.py`, then a live regression (Stage 3) with
    the service restarted on the new code.
 3. Commit, tag `vX.Y.Z`, push both.
