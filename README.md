@@ -9,10 +9,11 @@ macOS, MIT). This repo is the unofficial Linux port: same log contract
 (`[ACTION]` lines), same option shapes, different guts (AT-SPI instead of
 UI Automation / Accessibility API).
 
-> **Status: v0.3.** Detection works. Clicking is gated three ways
-> (ACTIVE-frame check, single-instance lock, burst guard) but is still
-> **unproven against a live prompt** — run `--observe` first and capture
-> one with `--probe`. See *Known limitations*.
+> **Status: v0.4.** Detection covers titled dialogs AND untitled
+> Wayland bubbles (child-count bump on the host frame). Clicking is gated
+> three ways (ACTIVE-frame check, single-instance lock, burst guard) but a
+> full live-prompt approval is still **unproven** — run `--observe` first
+> and capture one with `--probe`. See *Known limitations*.
 
 ## Why this exists
 
@@ -203,6 +204,9 @@ trigger: restart Chrome, then attach once via
 
 ## History
 
+- **v0.4** — untitled-bubble detection: track titled-frame child-count
+  baselines, flag +1 bumps (field-verified per pending attach), same
+  gating, verify by count returning to baseline. TESTING.md procedure.
 - **v0.3** — single-instance lock, minimal burst guard (`--burst-limit`),
   `atspi=ok` startup check, `--observe` documented as winning over
   `--enable-click`, systemd persistence + this README.
