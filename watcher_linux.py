@@ -2,14 +2,17 @@
 """Yes, Dev engine for Linux: watch for Chrome's "Allow remote debugging?"
 consent dialog through AT-SPI.
 
-Status: v0.5. Detection via AT-SPI: titled dialogs by title, untitled
-Wayland bubbles by window-geometry child totals (robust to tab-title
-churn; window open/close told apart by frame count). Click via AT-SPI
-Action when a button is exposed, otherwise an opt-in keyboard fallback
-(ydotool Enter) gated on the host window being ACTIVE, with a minimal
-burst guard (pause clicks 60s after 60 approvals/min) and a
-single-instance lock. The keyboard fallback is still UNPROVEN as an
-approval - keep --observe until a live prompt proves it.
+Status: v0.6 watchdog. Detection via AT-SPI is proven live (titled
+dialogs by title, untitled Wayland bubbles by window-geometry child
+totals). Activation is REMOVED: field work 2026-09-22 proved no synthetic
+input reaches the secure Views bubble on GNOME/Wayland - AT-SPI exposes
+no objects (Collection: zero buttons), uinput pointer clicks land nowhere
+on it (delivery proven on shell UI), blind Enter risks the Turn-off
+button (focus is unpredictable), and rescan-absence can't tell approval
+from withdraw (two false [ACTION]s logged and retracted). The engine
+detects, logs, counts pending prompts, and leaves the click to a human.
+If a future Chrome/X11 stack exposes the button, the AT-SPI Action path
+below still approves it with identity-verified logging.
 
 Why no plain Invoke like Windows/macOS: on GNOME + Wayland (Chrome 153,
 verified Sep 2026, real profile, remote-debugging on port 9222 in
@@ -41,8 +44,6 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import shutil
-import subprocess
 import sys
 import time
 from collections import deque
@@ -144,31 +145,6 @@ def _is_defunct(node) -> bool | None:
         return True
 
 
-def _is_active(node) -> bool:
-    """Whether the window is the ACTIVE one. Guards the keyboard fallback
-    so Enter never lands in an editor while Chrome sits in the background."""
-    try:
-        return Atspi.StateType.ACTIVE in set(node.get_state_set().get_states())
-    except Exception:
-        return False
-
-
-def _ydotool_key(keycode: int = 28) -> tuple[bool, str]:
-    """Press a key via ydotool (needs ydotoold running). Keycode 28 = Enter,
-    the default-button activator. Returns (ok, detail). Never raises."""
-    exe = shutil.which("ydotool")
-    if exe is None:
-        return False, "ydotool not on PATH"
-    try:
-        proc = subprocess.run([exe, "key", str(keycode)],
-                              capture_output=True, text=True, timeout=5)
-    except Exception as exc:
-        return False, f"ydotool spawn failed: {exc!r}"
-    if proc.returncode == 0:
-        return True, "ok"
-    return False, (proc.stderr or proc.stdout or f"exit {proc.returncode}").strip()[:200]
-
-
 def _do_action(node, preferred=("press", "click", "activate")) -> str | None:
     try:
         act = node.get_action_iface()
@@ -196,7 +172,7 @@ class Engine:
                  include_edge=False, log_path=LOG_PATH,
                  exit_with_parent=False, diagnostics=False,
                  dialog_pattern=DIALOG_PATTERN, approve_pattern=APPROVE_PATTERN,
-                 enable_click=False, burst_limit=BURST_LIMIT_DEFAULT):
+                 burst_limit=BURST_LIMIT_DEFAULT):
         self.observe = observe
         self.poll_s = max(0.05, poll_ms / 1000.0)
         self.include_edge = include_edge
@@ -205,7 +181,6 @@ class Engine:
         self.diagnostics = diagnostics
         self.dialog_pattern = dialog_pattern
         self.approve_pattern = approve_pattern
-        self.enable_click = enable_click
         self.burst_limit = burst_limit
         self._action_times: deque[float] = deque()
         self._burst_paused_until = 0.0
@@ -351,34 +326,6 @@ class Engine:
             return how2 + "+retry"
         return None
 
-    def _approve_keyboard(self, key: str) -> str | None:
-        """Experimental fallback: press Enter via ydotool, then verify the
-        candidate signature is gone on rescan. Only call with the host frame
-        ACTIVE. Returns how it fell, or None."""
-        ok, detail = _ydotool_key(28)
-        if not ok:
-            self.log(f"  keyboard fallback unavailable ({detail})", "WARN")
-            return None
-        time.sleep(VERIFY_WAIT_S)
-        try:
-            sigs = {self._dedupe_key(h) for _, h in self.find_dialog_hosts()}
-        except Exception:
-            return None
-        if key not in sigs:
-            return "ydotool:Enter"
-        # One retry; a queued successor shares the signature, so a second
-        # identical prompt is served next sweep rather than here.
-        ok2, _ = _ydotool_key(28)
-        time.sleep(VERIFY_WAIT_S)
-        if ok2:
-            try:
-                sigs2 = {self._dedupe_key(h) for _, h in self.find_dialog_hosts()}
-            except Exception:
-                return None
-            if key not in sigs2:
-                return "ydotool:Enter+retry"
-        return None
-
     def _burst_ok(self, now: float) -> bool:
         """Minimal burst guard. True when clicking is allowed right now."""
         if self.burst_limit <= 0:
@@ -437,30 +384,6 @@ class Engine:
                 out[(app_name, rect)] = {"frames": fam, "kind": kind, **e}
         return out
 
-    def _approve_keyboard_rect(self, key: tuple, baseline: int) -> str | None:
-        """Keyboard fallback verified by geometry total returning to baseline."""
-        ok, detail = _ydotool_key(28)
-        if not ok:
-            self.log(f"  keyboard fallback unavailable ({detail})", "WARN")
-            return None
-        time.sleep(VERIFY_WAIT_S)
-        try:
-            cur = self._rect_snapshot().get(key)
-        except Exception:
-            return None
-        if cur is None or cur["total"] <= baseline:
-            return "ydotool:Enter"
-        ok2, _ = _ydotool_key(28)
-        time.sleep(VERIFY_WAIT_S)
-        if ok2:
-            try:
-                cur2 = self._rect_snapshot().get(key)
-            except Exception:
-                return None
-            if cur2 is None or cur2["total"] <= baseline:
-                return "ydotool:Enter+retry"
-        return None
-
     def sweep(self):
         now = time.time()
         diag_sweep = self.diagnostics and now >= self._next_diagnostic_at
@@ -486,34 +409,14 @@ class Engine:
                     continue
                 self._seen[key] = now
                 if not labels:
-                    # Expected on Wayland today: frame visible, 0 AT-SPI
-                    # children. Keyboard fallback only with --enable-click
-                    # AND the host frame ACTIVE, so Enter cannot land in
-                    # an editor behind Chrome.
+                    # Expected on Wayland: the bubble exposes no title and
+                    # no actionable children. No synthetic input is known
+                    # to activate it (AT-SPI: nothing exposed; pointer:
+                    # ignored on the secure bubble; blind Enter: focus is
+                    # unpredictable and once sat on Turn-off). Watchdog
+                    # only: log it and leave it for a human click.
                     self.log(f"dialog candidate ({kind}) host={key} role={_role_name(host)!r} "
-                             f"title={_node_name(host)!r} children=0 - no AT-SPI button")
-                    if self.observe:
-                        self.log("  observe mode - not clicking", "OBSERVE")
-                        continue
-                    if not self.enable_click:
-                        self.log("  left alone (re-run with --enable-click for the experimental keyboard fallback)", "WARN")
-                        continue
-                    if not _is_active(host):
-                        self.log("  host frame not ACTIVE - keyboard fallback refused; left alone", "WARN")
-                        continue
-                    self.log("  keyboard fallback: host ACTIVE, sending Enter via ydotool", "AUDIT")
-                    if not self._burst_ok(now):
-                        self.log("  burst-paused - not clicking", "WARN")
-                        continue
-                    how = self._approve_keyboard(key)
-                    self._seen.pop(key, None)
-                    if how:
-                        self._note_action()
-                        self.approved += 1
-                        self.log(f"  APPROVED via {how}", "ACTION")
-                        self.log(f"  total approved this session: {self.approved}")
-                    else:
-                        self.log("  FAILED: candidate still present after keyboard fallback - retrying next sweep", "ERROR")
+                             f"title={_node_name(host)!r} children=0 - no safe activation; left alone", "WARN")
                     continue
                 self.log(f"dialog found ({kind}) buttons: " + ", ".join(f"'{b}'" for b in labels))
                 if self.observe:
@@ -563,29 +466,8 @@ class Engine:
                 continue
             self._seen[dkey] = now
             self.log(f"untitled bubble candidate ({e['kind']}) window={key[1]} "
-                     f"children {ptotal}->{e['total']} - consent bubble suspected")
-            if self.observe:
-                self.log("  observe mode - not clicking", "OBSERVE")
-                continue
-            if not self.enable_click:
-                self.log("  left alone (re-run with --enable-click for the experimental keyboard fallback)", "WARN")
-                continue
-            if e["frame"] is None or not _is_active(e["frame"]):
-                self.log("  host window not ACTIVE - keyboard fallback refused; left alone", "WARN")
-                continue
-            if not self._burst_ok(now):
-                self.log("  burst-paused - not clicking", "WARN")
-                continue
-            self.log("  keyboard fallback: host ACTIVE, sending Enter via ydotool", "AUDIT")
-            how = self._approve_keyboard_rect(key, ptotal)
-            self._seen.pop(dkey, None)
-            if how:
-                self._note_action()
-                self.approved += 1
-                self.log(f"  APPROVED via {how}", "ACTION")
-                self.log(f"  total approved this session: {self.approved}")
-            else:
-                self.log("  FAILED: bubble still present after keyboard fallback - retrying next sweep", "ERROR")
+                     f"children {ptotal}->{e['total']} - consent bubble suspected; "
+                     f"no safe activation on Wayland, left for human click", "WARN")
         for stale in [s for s in self._rects if s not in snap]:
             del self._rects[stale]
         if len(self._rects) > DEDUPE_MAX:
@@ -617,7 +499,7 @@ class Engine:
     def run(self):
         ok, detail = atspi_available()
         self.log(f"engine started (observe={self.observe}, interval={int(self.poll_s*1000)}ms, "
-                 f"enable_click={self.enable_click}, burst_limit={self.burst_limit}, "
+                 f"burst_limit={self.burst_limit}, "
                  f"atspi={detail}, pid={os.getpid()})")
         while True:
             if self.exit_with_parent and os.getppid() != self._parent_pid:
@@ -642,12 +524,8 @@ def main(argv=None):
     ap.add_argument("--approve-pattern", default=r"^(allow|approve)$")
     ap.add_argument("--exit-with-parent", action="store_true")
     ap.add_argument("--diagnostics", action="store_true")
-    ap.add_argument("--enable-click", action="store_true",
-                    help="EXPERIMENTAL: when no AT-SPI button exists and the host "
-                         "frame is ACTIVE, press Enter via ydotool (needs ydotoold). "
-                         "Off by default; --observe always wins.")
     ap.add_argument("--burst-limit", type=int, default=BURST_LIMIT_DEFAULT,
-                    help="pause clicks for 60s after this many approvals in a "
+                    help="pause AT-SPI approvals for 60s after this many in a "
                          "minute (0 disables; default 60, same as upstream)")
     args = ap.parse_args(argv)
     engine = Engine(observe=args.observe, poll_ms=args.interval_ms,
@@ -655,7 +533,6 @@ def main(argv=None):
                     exit_with_parent=args.exit_with_parent, diagnostics=args.diagnostics,
                     dialog_pattern=re.compile(args.dialog_pattern, re.I),
                     approve_pattern=re.compile(args.approve_pattern, re.I),
-                    enable_click=args.enable_click and not args.observe,
                     burst_limit=args.burst_limit)
     if args.probe:
         return engine.probe()
