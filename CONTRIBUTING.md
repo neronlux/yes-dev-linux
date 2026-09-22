@@ -16,6 +16,8 @@ auto_click.py      the visual click stack: portal screenshot, PIL button
                    --shot [DEST], --detect PNG, --click X Y.
 platform_linux.py  paths, single-instance lock, logging setup.
 tools/consent-check.py  the CDP trigger used by every live test.
+tools/doctor.py    read-only health check + recovery suggestions
+                   (service, debug port, covering windows, strays).
 tests/test_selfheal.py  offline checks for the v0.8 self-healing logic.
 TESTING.md         the full field record and repeatable test procedure.
 ```

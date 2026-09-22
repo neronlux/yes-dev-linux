@@ -237,6 +237,62 @@ Notes:
   log scan errors and retry; harmless, works after login.
 - Updates: `cd ~/yes-dev-linux && git pull && systemctl --user restart yes-dev.service`.
 
+## Troubleshooting & recovery
+
+One-shot health check — read-only, safe any time, works beside the
+service. It reports the service, Chrome's debug port, AT-SPI visibility,
+windows covering Chrome, stray clients and the engine's last actions,
+then prints the suggested next step:
+
+```bash
+/usr/bin/python3 tools/doctor.py
+```
+
+Manual playbook, in escalation order (all of it was walked through live
+in TESTING.md's v0.8.3 field notes):
+
+1. **Usually nothing.** v0.8.3+ raises a covered or inactive Chrome
+   window itself, retries swallowed first clicks, cools off between
+   cycles and rebuilds the pointer. A stubborn prompt can take ~30s.
+   Watch it work:
+
+   ```bash
+   tail -f ~/.local/share/YesDev/yes-dev.log
+   ```
+
+2. **`no Allow button visible 3x - leaving this window alone`** — the
+   bubble is not on the visible workspace, or is fully covered by
+   another window. Switch to the Chrome window showing the prompt
+   (window title visible), then attach again — a new request re-arms
+   the engine. This is the one case it cannot fix itself.
+
+3. **`clicked an uncovered corner ... to raise the host window`** —
+   automatic: another app's window was covering Chrome, the engine
+   raised it and is retrying. Nothing to do. If it repeats without an
+   `APPROVED` line, something is fully covering Chrome: bring it to the
+   front.
+
+4. **Attaches hang, the log is silent, no bubble ever appears** — the
+   browser's consent queue is stuck (pending requests leaked by killed
+   clients). Reset it, least destructive first:
+   - toggle remote debugging **OFF and ON** at
+     `chrome://inspect/#remote-debugging` (no restart), or
+   - restart Chrome (tabs restore). For a headless/RDP session:
+
+     ```bash
+     pkill -TERM -f '^/opt/google/chrome/chrome ?$'   # only the browser root
+     setsid -f env XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=wayland-0 \
+       DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus \
+       /usr/bin/google-chrome --ozone-platform=wayland --restore-last-session
+     ```
+
+5. **Stray test clients** (`pgrep -f chrome-devtools-mcp` shows piles) —
+   terminated clients can survive as orphans and queue extra attaches:
+
+   ```bash
+   pkill -f "[c]hrome-devtools-mcp"
+   ```
+
 ## Read this before anything else
 
 The prompt exists to stop a malicious local program from seizing your
@@ -300,6 +356,12 @@ the call hangs mid-handshake while the prompt is up).
 
 ## History
 
+- **v0.8.4** — `tools/doctor.py` (read-only health check that names the
+  covering window, the stuck queue, or strays and prints the next step)
+  and a README "Troubleshooting & recovery" playbook: the covered-window
+  raise, the workspace stand-down, the consent-queue reset (toggle or
+  restart, with headless commands), and orphan reaping. Docs and tools
+  only; the engine is unchanged.
 - **v0.8.3** — reliability batch, after a live incident where a second
   app's window covered Chrome for an hour: clicks vanish on a covered or
   inactive window, so now (1) the engine raises the host with one
