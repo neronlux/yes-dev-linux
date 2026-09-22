@@ -2,10 +2,12 @@
 """Yes, Dev engine for Linux: watch for Chrome's "Allow remote debugging?"
 consent dialog through AT-SPI.
 
-Status: v0.2. Detection via AT-SPI; click via AT-SPI Action when a button
+Status: v0.3. Detection via AT-SPI; click via AT-SPI Action when a button
 is exposed, otherwise an opt-in keyboard fallback (ydotool Enter) gated on
-the dialog's frame being the ACTIVE window. The fallback is UNPROVEN
-against a live prompt - keep --observe until you have captured one.
+the dialog's frame being ACTIVE window, with a minimal burst guard
+(pause clicks 60s after 60 approvals/min) and a single-instance lock.
+The keyboard fallback is still UNPROVEN against a live prompt - keep
+--observe until you have captured one with --probe.
 
 Why no plain Invoke like Windows/macOS: on GNOME + Wayland (Chrome 153,
 verified Sep 2026, real profile, remote-debugging on port 9222 in
@@ -41,14 +43,17 @@ import shutil
 import subprocess
 import sys
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
 try:
-    from platform_linux import DATA_DIR, LOG_PATH, ensure_data_dir
+    from platform_linux import (DATA_DIR, LOG_PATH, acquire_single_instance,
+                                atspi_available, ensure_data_dir)
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from platform_linux import DATA_DIR, LOG_PATH, ensure_data_dir
+    from platform_linux import (DATA_DIR, LOG_PATH, acquire_single_instance,
+                                atspi_available, ensure_data_dir)
 
 try:
     import gi
@@ -73,6 +78,11 @@ POLL_MS_DEFAULT = 250
 DEDUPE_SECONDS = 2.0
 DEDUPE_MAX = 400
 VERIFY_WAIT_S = 0.5
+# Minimal burst guard (the tray owns the real one upstream; this keeps an
+# unsupervised engine from approving a runaway loop forever).
+BURST_LIMIT_DEFAULT = 60   # approvals per window before pausing clicks
+BURST_WINDOW_S = 60.0
+BURST_PAUSE_S = 60.0
 
 _DIALOG_ROLES = {"dialog", "alert", "window", "frame"}
 
@@ -184,7 +194,7 @@ class Engine:
                  include_edge=False, log_path=LOG_PATH,
                  exit_with_parent=False, diagnostics=False,
                  dialog_pattern=DIALOG_PATTERN, approve_pattern=APPROVE_PATTERN,
-                 enable_click=False):
+                 enable_click=False, burst_limit=BURST_LIMIT_DEFAULT):
         self.observe = observe
         self.poll_s = max(0.05, poll_ms / 1000.0)
         self.include_edge = include_edge
@@ -194,6 +204,9 @@ class Engine:
         self.dialog_pattern = dialog_pattern
         self.approve_pattern = approve_pattern
         self.enable_click = enable_click
+        self.burst_limit = burst_limit
+        self._action_times: deque[float] = deque()
+        self._burst_paused_until = 0.0
         self.approved = 0
         self._parent_pid = os.getppid()
         self._seen: dict[str, float] = {}
@@ -363,6 +376,26 @@ class Engine:
                 return "ydotool:Enter+retry"
         return None
 
+    def _burst_ok(self, now: float) -> bool:
+        """Minimal burst guard. True when clicking is allowed right now."""
+        if self.burst_limit <= 0:
+            return True
+        if now < self._burst_paused_until:
+            return False
+        cutoff = now - BURST_WINDOW_S
+        while self._action_times and self._action_times[0] < cutoff:
+            self._action_times.popleft()
+        if len(self._action_times) >= self.burst_limit:
+            self._burst_paused_until = now + BURST_PAUSE_S
+            self.log(f"burst guard: {len(self._action_times)} approvals in "
+                     f"{int(BURST_WINDOW_S)}s >= limit {self.burst_limit} - "
+                     f"pausing clicks for {int(BURST_PAUSE_S)}s", "ERROR")
+            return False
+        return True
+
+    def _note_action(self) -> None:
+        self._action_times.append(time.time())
+
     def sweep(self):
         now = time.time()
         diag_sweep = self.diagnostics and now >= self._next_diagnostic_at
@@ -404,9 +437,13 @@ class Engine:
                         self.log("  host frame not ACTIVE - keyboard fallback refused; left alone", "WARN")
                         continue
                     self.log("  keyboard fallback: host ACTIVE, sending Enter via ydotool", "AUDIT")
+                    if not self._burst_ok(now):
+                        self.log("  burst-paused - not clicking", "WARN")
+                        continue
                     how = self._approve_keyboard(key)
                     self._seen.pop(key, None)
                     if how:
+                        self._note_action()
                         self.approved += 1
                         self.log(f"  APPROVED via {how}", "ACTION")
                         self.log(f"  total approved this session: {self.approved}")
@@ -421,9 +458,13 @@ class Engine:
                 if button is None:
                     self.log(f"  no button matched /{self.approve_pattern.pattern}/ - left alone", "WARN")
                     continue
+                if not self._burst_ok(now):
+                    self.log("  burst-paused - not clicking", "WARN")
+                    continue
                 how = self._approve(host, button)
                 self._seen.pop(key, None)
                 if how:
+                    self._note_action()
                     self.approved += 1
                     self.log(f"  APPROVED via {how}", "ACTION")
                     self.log(f"  total approved this session: {self.approved}")
@@ -458,8 +499,10 @@ class Engine:
         return 0
 
     def run(self):
+        ok, detail = atspi_available()
         self.log(f"engine started (observe={self.observe}, interval={int(self.poll_s*1000)}ms, "
-                 f"enable_click={self.enable_click}, pid={os.getpid()})")
+                 f"enable_click={self.enable_click}, burst_limit={self.burst_limit}, "
+                 f"atspi={detail}, pid={os.getpid()})")
         while True:
             if self.exit_with_parent and os.getppid() != self._parent_pid:
                 self.log("parent process is gone - exiting rather than approving unsupervised", "WARN")
@@ -487,17 +530,26 @@ def main(argv=None):
                     help="EXPERIMENTAL: when no AT-SPI button exists and the host "
                          "frame is ACTIVE, press Enter via ydotool (needs ydotoold). "
                          "Off by default; --observe always wins.")
+    ap.add_argument("--burst-limit", type=int, default=BURST_LIMIT_DEFAULT,
+                    help="pause clicks for 60s after this many approvals in a "
+                         "minute (0 disables; default 60, same as upstream)")
     args = ap.parse_args(argv)
     engine = Engine(observe=args.observe, poll_ms=args.interval_ms,
                     include_edge=args.include_edge, log_path=Path(args.log_path),
                     exit_with_parent=args.exit_with_parent, diagnostics=args.diagnostics,
                     dialog_pattern=re.compile(args.dialog_pattern, re.I),
                     approve_pattern=re.compile(args.approve_pattern, re.I),
-                    enable_click=args.enable_click and not args.observe)
+                    enable_click=args.enable_click and not args.observe,
+                    burst_limit=args.burst_limit)
     if args.probe:
         return engine.probe()
     if args.once:
         engine.sweep()
+        return 0
+    # One engine is enough; a second would double-press the same dialog.
+    # --once/--probe are diagnostic and bypass the lock on purpose.
+    if not acquire_single_instance("engine"):
+        engine.log("another engine already holds the lock - exiting", "WARN")
         return 0
     return engine.run()
 
