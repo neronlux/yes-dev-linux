@@ -240,6 +240,31 @@ Live validation, 19:46: fresh attach -> candidate -> first click
 swallowed (focus race) -> retry -> `APPROVED via abs-pointer click
 (837, 363)` -> client answered with its page list, no block.
 
+## v0.8.5 — force Chrome front + full screen (same day, ctd.)
+
+Windows were moved about again and the bubble hid under coverers. What
+the live probing proved:
+
+- Super+Up maximizes the focused window, but Ubuntu-style GNOME maps it
+  to TOGGLE: on a maximized window it restores, and on a half-tiled
+  window it restores to windowed first. The engine only sends it when
+  the window does not fill the screen and re-checks the area afterwards,
+  pressing once more if it shrank (mid-toggle).
+- Synthetic chords work from a combined pointer+keyboard uinput device
+  (Super+PageDown / Super+Up / Super+` all changed the screen when sent
+  by the engine's own device).
+- Repeated single Alt+Tabs ping-pong between the two most recent
+  windows; reaching deeper needs a held-Alt pass (Alt down, Tab n times,
+  release) - `auto_click.alttab_held` walks the MRU list that way.
+- Focus is AT-SPI-verified (an ACTIVE Chrome frame) before any key is
+  sent; nothing goes out blind.
+- Geometry migration: when a tracked window moves or is maximized, the
+  pending bubble follows the rect whose child total is still elevated -
+  never "whichever Chrome window is active".
+- Live evidence: "Chrome already fills the screen - maximize not
+  needed" (guard), "Chrome focused - sent Super+Up" (focus path), and
+  "following the bubble to ..." (migration) all fired in real runs.
+
 ## Stage 3 — fresh prompt (needs a Chrome restart)
 
 Consent resets on restart. This kills the main browser (tabs restore;

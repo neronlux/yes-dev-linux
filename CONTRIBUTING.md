@@ -107,9 +107,11 @@ rejected regardless of other merit:
    Never rescan-absence, never screen geometry.
 2. **Click only what the screenshot shows.** No blind coordinates, no
    keyboard fallbacks without focus knowledge (TESTING.md part 2/4 is
-   the graveyard — read it before proposing one). The single exception
-   is the uncovered-corner raise click for a covered/inactive host
-   window: once per bubble, never in the dialog area.
+   the graveyard — read it before proposing one). Two bounded
+   exceptions: the uncovered-corner raise click for a covered host
+   (once per bubble, never in the dialog area), and window-management
+   keys (Super+Up / Alt+Tab / Super+`) sent only after AT-SPI proves a
+   Chrome window is active — never to drive the dialog itself.
 3. **Off by default.** `--enable-click` stays opt-in; `--observe` always
    wins.
 4. **Burst guard + attempt cap stay.** 3 attempts per cycle, `--cool-off-s`

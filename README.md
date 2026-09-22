@@ -85,8 +85,12 @@ scan Chrome app frames (AT-SPI, title match, max 1 level deep)
   |                                                -> button not in the shot?
   |                                                   raise host (one
   |                                                   uncovered-corner click)
-  |                                                   and re-shoot; 3 empty
-  |                                                   looks -> stand down
+  |                                                   and re-shoot; then
+  |                                                   focus Chrome (held-Alt
+  |                                                   MRU walk) and Super+Up
+  |                                                   maximize (toggle-guarded),
+  |                                                   retry; 2 normalizes,
+  |                                                   then stand down
   |
   +-- match     -->  dedupe (2s window, geometry signature)
                        |
@@ -307,7 +311,10 @@ the same one upstream's tray makes. This port ships with:
   (default 30s) before a fresh cycle — never hammering;
 - a click that only ever fires on a button found in a live screenshot,
   so an occluded or unexpected dialog is left untouched — plus at most
-  one uncovered-corner click per bubble to raise a covered host window.
+  one uncovered-corner click per bubble to raise a covered host window;
+- synthetic keyboard used only for window management (Super+Up maximize,
+  Alt+Tab / Super+` focus walking), never before AT-SPI proves a Chrome
+  window is active, and never to drive the dialog itself.
 
 Run `--observe` first, and prefer a throwaway `--user-data-dir` profile
 wherever you do not need real browser state.
@@ -332,12 +339,15 @@ wherever you do not need real browser state.
   refuses double-run via the lock and `--exit-with-parent` is available
   for supervised launches.
 - **Covered or inactive host window**: only the active window receives
-  clicks on Wayland. If another app covers Chrome (observed live: a
-  second app's window hid the bubble for an hour), or the shell holds
-  focus, the engine raises the host with one uncovered-corner click and
-  retries. If the bubble is still not visible after 3 looks it stands
-  down on that window and logs it — switch to the covered window by hand
-  and a new attach re-arms it.
+  clicks on Wayland. If another app covers Chrome, or the shell holds
+  focus, the engine raises the host (uncovered-corner click), focuses a
+  Chrome window (held-Alt MRU walk), and maximizes it with Super+Up —
+  guarded, because Ubuntu-style GNOME maps Super+Up to a toggle: it is
+  only sent when the window does not already fill the screen, and the
+  area is re-checked, pressing once more if the toggle had restored a
+  tiled window. Two normalize attempts per bubble, then it stands down
+  and logs it — bring the Chrome window forward and a new attach
+  re-arms it.
 - Untested: a bubble host on another workspace (raise clicks can only
   reach the current workspace; the stand-down covers it).
 
@@ -356,6 +366,16 @@ the call hangs mid-handshake while the prompt is up).
 
 ## History
 
+- **v0.8.5** — "force Chrome to the front and full screen, then click":
+  when the bubble is not visible the engine normalizes the window —
+  uncovered-corner raise, held-Alt MRU focus walk (single Alt+Tabs
+  ping-pong and never reach a third window), Super+Up maximize — then
+  retries, with geometry migration following a moved or maximized
+  window. Guarded: focus is AT-SPI-verified before any key is sent;
+  Super+Up is skipped when the window already fills the screen and
+  re-pressed once if the toggle restored a tiled window; two normalize
+  attempts per bubble, then stand-down. Validated live: the toggle
+  guard, focus walk, maximize and migration all fired in real runs.
 - **v0.8.4** — `tools/doctor.py` (read-only health check that names the
   covering window, the stuck queue, or strays and prints the next step)
   and a README "Troubleshooting & recovery" playbook: the covered-window

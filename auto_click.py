@@ -223,7 +223,8 @@ class AbsoluteClicker:
                     (e.ABS_X, AbsInfo(0, 0, want[0] - 1, 0, 0, 1)),
                     (e.ABS_Y, AbsInfo(0, 0, want[1] - 1, 0, 0, 1)),
                 ],
-                e.EV_KEY: [e.BTN_LEFT],
+                e.EV_KEY: [e.BTN_LEFT, e.KEY_LEFTMETA, e.KEY_LEFTALT,
+                           e.KEY_TAB, e.KEY_UP],
             }
             dev = UInput(cap, name="yesdev absolute pointer", version=1)
         except Exception:
@@ -253,6 +254,66 @@ class AbsoluteClicker:
             return True
         except Exception:
             return False
+
+    def key_combo(self, *codes, hold: float = 0.05, gap: float = 0.08) -> bool:
+        """Press keys in order, release in reverse (e.g. Super+Up)."""
+        if self.dev is None and not self.available():
+            return False
+        from evdev import ecodes as e
+        try:
+            for c in codes:
+                self.dev.write(e.EV_KEY, c, 1)
+                self.dev.syn()
+                time.sleep(hold)
+            for c in reversed(codes):
+                self.dev.write(e.EV_KEY, c, 0)
+                self.dev.syn()
+                time.sleep(gap)
+            return True
+        except Exception:
+            return False
+
+
+def combo(clicker, which: str) -> bool:
+    """Named window-management chords, used only to bring Chrome to the
+    front and maximize it (verified via AT-SPI before the maximize)."""
+    from evdev import ecodes as e
+    combos = {
+        "maximize": (e.KEY_LEFTMETA, e.KEY_UP),      # GNOME maximize (toggle on Ubuntu-style setups)
+        "nextwindow": (e.KEY_LEFTMETA, e.KEY_GRAVE),  # cycle same-app windows
+        "alttab": (e.KEY_LEFTALT, e.KEY_TAB),         # switch to previous window
+    }
+    codes = combos.get(which)
+    if not codes or clicker is None:
+        return False
+    return clicker.key_combo(*codes)
+
+
+def alttab_held(clicker, n: int) -> bool:
+    """Hold Alt and tap Tab n times, then release: walks n windows down the
+    MRU list in one switcher pass. Repeated single Alt+Tabs ping-pong
+    between two windows and never reach a third, so probing steps n up."""
+    if clicker is None:
+        return False
+    if clicker.dev is None and not clicker.available():
+        return False
+    from evdev import ecodes as e
+    try:
+        clicker.dev.write(e.EV_KEY, e.KEY_LEFTALT, 1)
+        clicker.dev.syn()
+        time.sleep(0.12)
+        for _ in range(max(1, int(n))):
+            clicker.dev.write(e.EV_KEY, e.KEY_TAB, 1)
+            clicker.dev.syn()
+            time.sleep(0.1)
+            clicker.dev.write(e.EV_KEY, e.KEY_TAB, 0)
+            clicker.dev.syn()
+            time.sleep(0.1)
+        clicker.dev.write(e.EV_KEY, e.KEY_LEFTALT, 0)
+        clicker.dev.syn()
+        return True
+    except Exception:
+        return False
 
 
 def image_size(png_path: str) -> tuple[int, int] | None:

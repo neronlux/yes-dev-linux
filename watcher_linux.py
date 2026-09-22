@@ -2,7 +2,7 @@
 """Yes, Dev engine for Linux: watch for Chrome's "Allow remote debugging?"
 consent dialog through AT-SPI.
 
-Status: v0.8.4. Detection via AT-SPI is proven live (titled dialogs by
+Status: v0.8.5. Detection via AT-SPI is proven live (titled dialogs by
 title, untitled Wayland bubbles by window-geometry child totals).
 Auto-approval works via a visual pipeline, proven end-to-end on
 2026-09-22: xdg-desktop-portal screenshot (no prompt) -> PIL finds the
@@ -215,6 +215,7 @@ class Engine:
         self._cycle_next: dict[str, float] = {}
         self._nobutton: dict[str, int] = {}
         self._raised: set[str] = set()
+        self._normalized: dict[str, int] = {}
         self.enable_click = enable_click and not observe
         self._action_times: deque[float] = deque()
         self._burst_paused_until = 0.0
@@ -514,6 +515,108 @@ class Engine:
                  f"(it was covered or inactive)", "AUDIT")
         return True
 
+    def _active_chrome_frame(self):
+        """(kind, (x, y, w, h)) of an ACTIVE Chrome frame, or None.
+
+        Keyboard window-management (Super+Up, Alt+Tab) acts on whatever
+        has focus, so it is only ever sent after this check proves a
+        Chrome window is active - never blind.
+        """
+        if Atspi is None:
+            return None
+        for kind, app in self._browser_apps():
+            for fr in _children(app):
+                try:
+                    if not fr.get_state_set().contains(Atspi.StateType.ACTIVE):
+                        continue
+                    b = _bounds(fr)
+                    if b and b[2] > 200:
+                        return kind, b
+                except Exception:
+                    continue
+        return None
+
+    def _normalize_host(self, dkey: str):
+        """Bring Chrome to the front and maximize it, so the bubble has a
+        deterministic position. Returns (kind, rect) of the active Chrome
+        frame after maximizing, or None if Chrome could not be focused.
+
+        Focus path: uncovered-corner click (partial cover), then Alt+Tab
+        probing (fully covered); a second normalize attempt also cycles
+        same-app windows with Super+` (bubble may be on another Chrome
+        window). Maximize is GNOME's Super+Up, idempotent when already
+        maximized. Focus is verified before any key is sent.
+        """
+        if auto_click is None:
+            return None
+        n = self._normalized.get(dkey, 0)
+        if n >= 2:
+            return None
+        self._normalized[dkey] = n + 1
+
+        act = self._active_chrome_frame()
+        if act is None:
+            self._raise_host(dkey)          # corner click, if any is uncovered
+            time.sleep(0.4)
+            act = self._active_chrome_frame()
+        clicker = self._get_clicker(None)
+        if clicker is None:
+            return None
+        k = 1
+        while act is None and k <= 3:
+            auto_click.alttab_held(clicker, k)   # walk k windows down the MRU
+            time.sleep(0.5)
+            act = self._active_chrome_frame()
+            k += 1
+        if act is None:
+            self.log("  could not bring Chrome to the front (no focus within "
+                     "reach); leaving this bubble alone", "WARN")
+            return None
+        if n >= 1:
+            auto_click.combo(clicker, "nextwindow")   # other Chrome window?
+            time.sleep(0.5)
+            act = self._active_chrome_frame() or act
+        kind, b = act
+        # Ubuntu-style GNOME maps Super+Up to TOGGLE maximize: only send it
+        # when the window clearly does not already fill the screen, or we
+        # would restore it to windowed mid-bubble.
+        sw, sh = auto_click._screen_size() or (0, 0)
+        fills = sw and b[2] >= sw - 64 and b[3] >= sh - 24
+        if fills:
+            self.log("  Chrome already fills the screen - maximize not needed", "AUDIT")
+        elif not auto_click.combo(clicker, "maximize"):
+            return None
+        else:
+            before_area = b[2] * b[3]
+            time.sleep(0.5)
+            act2 = self._active_chrome_frame() or act
+            if act2[1][2] * act2[1][3] < before_area:
+                # Toggle was mid-state (e.g. half-tiled): first press
+                # restored it. One more press maximizes from windowed.
+                auto_click.combo(clicker, "maximize")
+                time.sleep(0.5)
+                act2 = self._active_chrome_frame() or act2
+            self.log("  Chrome focused - maximized; the bubble now has a "
+                     "deterministic position", "AUDIT")
+        time.sleep(0.4)
+        act = self._active_chrome_frame() or act
+        kind, b = act
+        rect = f"{b[0]},{b[1]},{b[2]}x{b[3]}"
+        return kind, rect
+
+    def _migrate(self, old: str, new: str) -> None:
+        """Move bubble tracking to a new geometry key (window moved or was
+        maximized while the bubble was pending)."""
+        if old == new or old not in self._pending:
+            return
+        self._pending[new] = self._pending.pop(old)
+        self._click_attempts[new] = 0
+        self._click_last.pop(old, None)
+        self._cycle_next.pop(old, None)
+        self._nobutton.pop(old, None)
+        self._raised.discard(old)
+        self._normalized[new] = self._normalized.pop(old, 0)
+
     def _note_scan(self, ok: bool) -> None:
         """Re-init AT-SPI after a run of failures: at boot the a11y bus can
         start after us, and a connection made too early never heals."""
@@ -713,6 +816,7 @@ class Engine:
                     self._click_last.pop(dkey, None)
                     self._nobutton.pop(dkey, None)
                     self._raised.discard(dkey)
+                    self._normalized.pop(dkey, None)
                 continue
             # A bump happened. First time: record the base and announce.
             if dkey not in self._pending:
@@ -764,6 +868,7 @@ class Engine:
                 self._click_last.pop(dkey, None)
                 self._nobutton.pop(dkey, None)
                 self._raised.discard(dkey)
+                self._normalized.pop(dkey, None)
                 self.approved += 1
                 self.log(f"  APPROVED via {how}", "ACTION")
                 self.log(f"  total approved this session: {self.approved}")
@@ -774,14 +879,31 @@ class Engine:
                 # cycling forever on a phantom.
                 nb = self._nobutton.get(dkey, 0) + 1
                 if nb >= NO_BUTTON_STOP:
-                    self.log(f"  no Allow button visible {nb}x - leaving this window "
-                             f"alone (a new child bump re-arms)", "WARN")
-                    self._pending.pop(dkey, None)
-                    self._click_attempts.pop(dkey, None)
-                    self._cycle_next.pop(dkey, None)
-                    self._click_last.pop(dkey, None)
-                    self._nobutton.pop(dkey, None)
-                    self._raised.discard(dkey)
+                    # Before standing down: force Chrome to the front and
+                    # maximize it, then keep tracking the bubble under the
+                    # new geometry. Focus is AT-SPI-verified before any key
+                    # is sent; capped at two normalize attempts per bubble.
+                    norm = self._normalize_host(dkey)
+                    if norm:
+                        # Keep tracking the original host: if its geometry
+                        # changed (maximized), the stale-rect migration
+                        # follows it to the rect whose total is still
+                        # elevated - never blindly to whichever Chrome
+                        # window happens to be active.
+                        self._click_attempts[dkey] = 0
+                        self._nobutton.pop(dkey, None)
+                        self._raised.discard(dkey)
+                        self.log("  retrying on the re-focused window", "INFO")
+                    else:
+                        self.log(f"  no Allow button visible {nb}x - leaving this window "
+                                 f"alone (a new child bump re-arms)", "WARN")
+                        self._pending.pop(dkey, None)
+                        self._click_attempts.pop(dkey, None)
+                        self._cycle_next.pop(dkey, None)
+                        self._click_last.pop(dkey, None)
+                        self._nobutton.pop(dkey, None)
+                        self._raised.discard(dkey)
+                        self._normalized.pop(dkey, None)
                 else:
                     self._nobutton[dkey] = nb
                     self.log(f"  Allow button not visible ({nb}/{NO_BUTTON_STOP}) - "
@@ -804,12 +926,31 @@ class Engine:
             del self._rects[stale]
         for stale in [s for s in list(self._pending)
                       if not any(s.startswith(f"bubble:{k[0]}:{k[1]}") for k in snap)]:
+            # The host window may simply have moved or been resized while
+            # the bubble was pending: follow it to the one new geometry of
+            # the same kind whose child total is still above its base.
+            migrated = False
+            try:
+                _, skind, _ = stale.split(":", 2)
+                base = self._pending.get(stale)
+                cands = [k for k, e in snap.items()
+                         if k[0] == skind and base is not None and e["total"] > base]
+                if len(cands) == 1:
+                    new_key = f"bubble:{cands[0][0]}:{cands[0][1]}"
+                    self._migrate(stale, new_key)
+                    self.log(f"  bubble window moved - following it to {new_key}", "INFO")
+                    migrated = True
+            except Exception:
+                pass
+            if migrated:
+                continue
             self._pending.pop(stale, None)
             self._click_attempts.pop(stale, None)
             self._cycle_next.pop(stale, None)
             self._click_last.pop(stale, None)
             self._nobutton.pop(stale, None)
             self._raised.discard(stale)
+            self._normalized.pop(stale, None)
         if len(self._rects) > DEDUPE_MAX:
             for s in list(self._rects)[:len(self._rects) - DEDUPE_MAX]:
                 del self._rects[s]
