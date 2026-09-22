@@ -9,11 +9,12 @@ macOS, MIT). This repo is the unofficial Linux port: same log contract
 (`[ACTION]` lines), same option shapes, different guts (AT-SPI instead of
 UI Automation / Accessibility API).
 
-> **Status: v0.4.** Detection covers titled dialogs AND untitled
-> Wayland bubbles (child-count bump on the host frame). Clicking is gated
-> three ways (ACTIVE-frame check, single-instance lock, burst guard) but a
-> full live-prompt approval is still **unproven** — run `--observe` first
-> and capture one with `--probe`. See *Known limitations*.
+> **Status: v0.6 watchdog.** Detection is proven live; synthetic
+> activation was attempted exhaustively and removed — on GNOME/Wayland no
+> programmatic input reaches the secure Views bubble (details in
+> TESTING.md), so the engine detects, logs, and counts pending prompts
+> instead of pretending to click. If your stack exposes the button
+> (e.g. X11), the AT-SPI Action path still approves it.
 
 ## Why this exists
 
@@ -57,30 +58,28 @@ unchanged whichever engine is running.
 ```
 scan Chrome app frames (AT-SPI, title match, max 1 level deep)
   |
-  +-- no match  -->  quiet (the common case costs one ~50ms scan)
+  +-- no match  -->  geometry check: window child totals vs baseline
+  |                    |
+  |                    +-- no growth --> quiet (~50ms scan is the common case)
+  |                    +-- growth with frame count unchanged + titled window
+  |                                     --> untitled bubble candidate, log WARN
   |
   +-- match     -->  dedupe (2s window, geometry signature)
                        |
                        +-- buttons exposed?
-                       |     YES -> AT-SPI Action press -> verify gone -> [ACTION]
-                       |     NO  -> children=0 candidate (normal on Wayland):
-                       |              --observe?            log OBSERVE, stop
-                       |              --enable-click off?   log WARN, stop
-                       |              frame not ACTIVE?     refuse, log WARN, stop
-                       |              burst-paused?         log WARN, stop
-                       |              else: ydotool Enter -> rescan gone? -> [ACTION]
+                             YES -> AT-SPI Action press -> ref-identity verify -> [ACTION]
+                             NO  -> log WARN (no safe activation on Wayland), stop
 ```
 
 Rules the engine never breaks:
 
 - **Verify before logging.** `[ACTION]` is written only after the dialog
-  is confirmed gone — by AT-SPI ref identity for the Action path, by
-  rescan for the keyboard path. Never by screen geometry: Chrome draws a
-  queued successor exactly where the last prompt was.
-- **Never moves the mouse, never steals focus.** AT-SPI Action and
-  ydotool-key need neither.
-- **--observe always wins.** Passing `--observe --enable-click` together
-  runs fully observe-only (the flags are ANDed, not ORed).
+  is confirmed gone by AT-SPI ref identity. Never by rescan-absence
+  (which once logged two false approvals) and never by screen geometry:
+  Chrome draws a queued successor exactly where the last prompt was.
+- **No synthetic input.** The engine never moves the mouse, never steals
+  focus, never sends keys — v0.3–v0.5 proved none of it reaches the
+  secure Views bubble, and blind Enter once risked Turn-off.
 - **One engine.** A second copy exits on the single-instance lock instead
   of double-pressing a dialog. `--once`/`--probe` bypass the lock on
   purpose (diagnostics must work beside the service).
@@ -92,8 +91,6 @@ sudo apt install python3-gi gir1.2-atspi-2.0   # AT-SPI via GObject Introspectio
 ```
 
 No `pip install` — use the distro python (it ships `python3-gi`).
-For the experimental keyboard fallback only: `ydotoold` running
-(`ps aux | grep ydotoold`; Ubuntu ships `ydotool`).
 
 ## Install & run
 
@@ -114,15 +111,14 @@ brew install yes-dev-linux
 
 | Flag | What it does |
 |---|---|
-| `--observe` | Master safety: log only, never click. Overrides `--enable-click`. |
-| `--enable-click` | Arm the experimental keyboard fallback (default off). |
+| `--observe` | Log only, never touch anything (default posture). |
 | `--once` | One sweep then exit (diagnostic, bypasses lock). |
 | `--probe` | Dump the AT-SPI tree around Chrome, then exit. |
 | `--interval-ms` | Poll interval, default 250 (150/250/750 like upstream). |
 | `--include-edge` | Also watch Microsoft Edge windows. |
 | `--dialog-pattern` | Dialog title regex (default `^allow remote debugging\?$`). Localised Chrome? Start here. |
 | `--approve-pattern` | Button label regex (default `^(allow\|approve)$`). Anchored so *Turn off in settings* is never hit. |
-| `--burst-limit` | Pause clicks 60s after this many approvals/min (default 60, `0` disables). Same default as upstream, measured not guessed. |
+| `--burst-limit` | Pause AT-SPI approvals 60s after this many/min (default 60, `0` disables). Same default as upstream, measured not guessed. |
 | `--exit-with-parent` | Exit when the launching process goes away (for supervised runs). |
 | `--diagnostics` | Log scan timing every 5s. |
 | `--log-path` | Default `~/.local/share/YesDev/yes-dev.log`. |
@@ -140,7 +136,7 @@ Setup (already done on the author's VM; repeat anywhere):
 # 1. persistent copy outside scratch space
 git clone https://github.com/neronlux/yes-dev-linux.git ~/yes-dev-linux
 # 2. unit file at ~/.config/systemd/user/yes-dev.service:
-#    ExecStart=/usr/bin/python3 /home/USER/yes-dev-linux/watcher_linux.py --enable-click
+#    ExecStart=/usr/bin/python3 /home/USER/yes-dev-linux/watcher_linux.py --observe
 systemctl --user daemon-reload
 systemctl --user enable --now yes-dev.service
 # 3. reboot survival needs lingering (usually already on):
@@ -162,34 +158,30 @@ Notes:
   double-starts.
 - Updating: `cd ~/yes-dev-linux && git pull && systemctl --user restart yes-dev.service`.
 
-## Read this before you arm the clicker
+## Read this before anything else
 
 The prompt exists to stop a malicious local program from seizing your
-signed-in browser. Auto-approving lets **any** local process in, not just
-yours. Upstream's tray adds a stay-on window and an ask-first burst guard;
-this port has a silent minimal guard (pause 60s past the per-minute limit)
-and no tray yet, so:
+signed-in browser. This port does not auto-approve on Wayland (nothing
+reaches the bubble — proven, see TESTING.md), so it cannot reduce your
+protection today; it watches and logs. If a future stack exposes the
+button, the AT-SPI path approves with the same two mitigations upstream
+ships in its tray (stay-on window, burst guard — minimal silent versions
+here), so:
 
 - run `--observe` first and capture a live prompt with `--probe`,
-- keep it supervised until the click path is proven against YOUR Chrome
-  build,
 - prefer a throwaway `--user-data-dir` profile wherever you do not need
   real browser state.
 
 ## Known limitations
 
-- **Wayland frames expose zero AT-SPI children** (verified: Chrome 153,
-  GNOME/Wayland, every frame `child_count 0`). The AT-SPI button path
-  therefore rarely fires; the gated keyboard fallback carries the load
-  until a live prompt is captured and characterised.
+- **No synthetic activation on Wayland** (verdict, not gap): AT-SPI
+  exposes zero objects (Collection: zero buttons), uinput pointer clicks
+  land everywhere except the secure bubble, blind Enter risks Turn-off
+  (focus is unpredictable), and rescan-absence can't tell approval from
+  withdraw. The engine is an honest watchdog until that changes.
 - **English Chrome only** (same as upstream): matched by title string —
   but `--dialog-pattern`/`--approve-pattern` are exposed flags, so a
   localised build can be attempted without code changes.
-- **Enter-is-default assumption**: disproven live (initial focus is on
-  **Cancel**, and blind Enter did nothing). The engine therefore never
-  sends bare Enter; a future clicker must reach Allow by coordinates or
-  by Tab-walking from a verified start — check `yes-dev.log` for
-  `APPROVED` vs `FAILED` lines.
 - No tray, no stay-on timer, no ask-first burst dialog yet. The engine
   refuses double-run via the lock and `--exit-with-parent` is available
   for supervised launches.
@@ -205,9 +197,11 @@ trigger: restart Chrome, then attach once via
 
 ## History
 
-- **v0.4** — untitled-bubble detection: track titled-frame child-count
-  baselines, flag +1 bumps (field-verified per pending attach), same
-  gating, verify by count returning to baseline. TESTING.md procedure.
+- **v0.6** — synthetic activation removed (verdict: nothing reaches the
+  secure Views bubble); honest watchdog (detect, log, count pending),
+  AT-SPI Action path retained for exposing stacks.
+- **v0.5** — geometry-keyed bubble detection (survives tab-title churn).
+- **v0.4** — untitled-bubble detection via child-count bump.
 - **v0.3** — single-instance lock, minimal burst guard (`--burst-limit`),
   `atspi=ok` startup check, `--observe` documented as winning over
   `--enable-click`, systemd persistence + this README.
