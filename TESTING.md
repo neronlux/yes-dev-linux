@@ -265,6 +265,38 @@ the live probing proved:
   needed" (guard), "Chrome focused - sent Super+Up" (focus path), and
   "following the bubble to ..." (migration) all fired in real runs.
 
+## Verified use cases - live ledger (v0.8.11)
+
+Everything proven on the author's VM (GNOME/Wayland, Chrome 153,
+2026-09-22). Status is honest: LIVE = observed end-to-end, UNIT = covered
+by an offline test only, OPEN = designed-for but not exercised.
+
+| Use case | Status | Evidence / note |
+|---|---|---|
+| Untitled Wayland bubble detected and approved, unattended | LIVE | first full run 17:14; dozens since |
+| Titled dialog via AT-SPI Action path (X11 stacks) | OPEN | retained from v0.3; not re-exercised (Wayland-only VM) |
+| First click swallowed -> retry lands | LIVE | recurring on every few bubbles |
+| All 3 clicks swallowed -> cool-off -> fresh pointer -> approved | LIVE | 19:56 run (v0.8.2 path) |
+| Covered host window -> uncovered-corner raise -> approved | LIVE | 18:15 raise revealed the hidden bubble |
+| Inactive window focus race -> raise/retry lands | LIVE | raise on failure noted in runs |
+| Two Chrome windows -> migration follows the elevated rect | LIVE | 20:03 run ("following the bubble to ...") |
+| Window maximise toggle mid-state guarded + re-press | UNIT | area guard seen live; the re-press branch not hit |
+| Host-targeted Super+` cycling (active rect == tracked host) | LIVE | cycling ran; exact-match branch bounded |
+| Workspace hunt: bubble on ws2 found, clicked, restored | LIVE | 21:00 run, client unblocked 11.5s |
+| Child-bump aliasing (leak/clear race) -> visual backstop | LIVE | 21:09 backstop caught it ~2s after restart |
+| Leaked child totals -> visual verify accepts + leak note | LIVE | leak note logged on several approvals |
+| Screenshot lag -> totals verify accepts | UNIT | two-way branch not distinctly observed |
+| RDP/desktop resize -> pointer rebuilt at new size | UNIT | no real logical size change occurred on this VM |
+| Service restart -> restart=always, lock, fresh pointer | LIVE | multiple restarts |
+| Real reboot end-to-end (service, pointer, selftest, Chrome, approve) | LIVE | 21:02-21:03, unattended VERDICT: WORKS |
+| Locked screen -> clicks paused | UNIT | GetActive=false exercised; locked branch not hit live |
+| Stuck consent queue -> hint / opt-in restart | OPEN | hint design; the queue was reset manually (toggle/restart) |
+| Multi-monitor | OPEN | detection + warning only; no second monitor on this VM |
+| Restyled / localised dialog | OPEN | needs a capture; calibration path documented |
+| Burst guard pauses approvals | UNIT | simple counter; never tripped in testing |
+| Double-start lock | LIVE | second engine exits as designed |
+| Doctor + selftest + state.json | LIVE | run repeatedly, including post-reboot |
+
 ## Edge-case matrix (v0.8.6)
 
 Every known failure mode, how it is detected and what happens

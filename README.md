@@ -392,6 +392,9 @@ the call hangs mid-handshake while the prompt is up).
 
 ## History
 
+- **v0.8.11** — docs release: TESTING.md gains a "Verified use cases -
+  live ledger" (every capability with an honest LIVE / UNIT / OPEN
+  status and its evidence). Engine unchanged since v0.8.10.
 - **v0.8.10** — visual backstop: the child-count bump can be missed when
   a leaked node clears exactly as a new attach bumps (the count returns
   to the value already recorded - observed live post-reboot, engine
