@@ -2,12 +2,14 @@
 """Yes, Dev engine for Linux: watch for Chrome's "Allow remote debugging?"
 consent dialog through AT-SPI.
 
-Status: v0.3. Detection via AT-SPI; click via AT-SPI Action when a button
+Status: v0.4. Detection via AT-SPI; click via AT-SPI Action when a button
 is exposed, otherwise an opt-in keyboard fallback (ydotool Enter) gated on
-the dialog's frame being ACTIVE window, with a minimal burst guard
+the dialog's frame being the ACTIVE window, with a minimal burst guard
 (pause clicks 60s after 60 approvals/min) and a single-instance lock.
-The keyboard fallback is still UNPROVEN against a live prompt - keep
---observe until you have captured one with --probe.
+On Wayland the bubble carries no title, so untitled bubbles are detected
+by child-count bump on a titled frame (field-verified 1->2->3 per pending
+attach, back to 1 after Enter). The keyboard fallback is still UNPROVEN
+as an approval - keep --observe until a live prompt proves it.
 
 Why no plain Invoke like Windows/macOS: on GNOME + Wayland (Chrome 153,
 verified Sep 2026, real profile, remote-debugging on port 9222 in
@@ -207,6 +209,7 @@ class Engine:
         self.burst_limit = burst_limit
         self._action_times: deque[float] = deque()
         self._burst_paused_until = 0.0
+        self._counts: dict[str, int] = {}
         self.approved = 0
         self._parent_pid = os.getppid()
         self._seen: dict[str, float] = {}
@@ -396,6 +399,52 @@ class Engine:
     def _note_action(self) -> None:
         self._action_times.append(time.time())
 
+    def _frame_counts(self) -> dict:
+        """sig -> (kind, frame, child_count) for titled frames.
+
+        On Wayland the consent bubble exposes no title and no actionable
+        children, but the host frame's child_count bumps +1 per pending
+        bubble (field-verified). This is the only visible trace."""
+        out = {}
+        for kind, app in self._browser_apps():
+            for frame in _children(app):
+                title = _node_name(frame).strip()
+                if not title:
+                    continue
+                if _role_name(frame).lower() not in _DIALOG_ROLES:
+                    continue
+                try:
+                    n = frame.get_child_count()
+                except Exception:
+                    continue
+                # Title-qualified: two windows can share geometry.
+                out[title.lower() + "|" + self._dedupe_key(frame)] = (kind, frame, n)
+        return out
+
+    def _approve_keyboard_count(self, sig: str, baseline: int) -> str | None:
+        """Keyboard fallback verified by count: the bump must be gone."""
+        ok, detail = _ydotool_key(28)
+        if not ok:
+            self.log(f"  keyboard fallback unavailable ({detail})", "WARN")
+            return None
+        time.sleep(VERIFY_WAIT_S)
+        try:
+            cur = self._frame_counts().get(sig)
+        except Exception:
+            return None
+        if cur is None or cur[2] <= baseline:
+            return "ydotool:Enter"
+        ok2, _ = _ydotool_key(28)
+        time.sleep(VERIFY_WAIT_S)
+        if ok2:
+            try:
+                cur2 = self._frame_counts().get(sig)
+            except Exception:
+                return None
+            if cur2 is None or cur2[2] <= baseline:
+                return "ydotool:Enter+retry"
+        return None
+
     def sweep(self):
         now = time.time()
         diag_sweep = self.diagnostics and now >= self._next_diagnostic_at
@@ -475,6 +524,53 @@ class Engine:
         if len(self._seen) > DEDUPE_MAX:
             cutoff = now - 300
             self._seen = {k: v for k, v in self._seen.items() if v >= cutoff}
+        # Untitled bubbles: titled frames whose child_count grew since last
+        # sweep. Title path above takes precedence for the same host.
+        try:
+            counts = self._frame_counts()
+            titled = {self._dedupe_key(h) for _, h in hosts}
+        except Exception as exc:
+            self.log(f"bubble scan error: {exc!r}", "ERROR")
+            counts, titled = {}, set()
+        for sig, (kind, frame, n) in counts.items():
+            baseline = self._counts.get(sig)
+            self._counts[sig] = n
+            if baseline is None or n <= baseline or sig in titled:
+                continue
+            key = "bubble:" + sig
+            last = self._seen.get(key)
+            if last is not None and now - last < DEDUPE_SECONDS:
+                continue
+            self._seen[key] = now
+            self.log(f"untitled bubble candidate ({kind}) host={sig} "
+                     f"children {baseline}->{n} - consent bubble suspected")
+            if self.observe:
+                self.log("  observe mode - not clicking", "OBSERVE")
+                continue
+            if not self.enable_click:
+                self.log("  left alone (re-run with --enable-click for the experimental keyboard fallback)", "WARN")
+                continue
+            if not _is_active(frame):
+                self.log("  host frame not ACTIVE - keyboard fallback refused; left alone", "WARN")
+                continue
+            if not self._burst_ok(now):
+                self.log("  burst-paused - not clicking", "WARN")
+                continue
+            self.log("  keyboard fallback: host ACTIVE, sending Enter via ydotool", "AUDIT")
+            how = self._approve_keyboard_count(sig, baseline)
+            self._seen.pop(key, None)
+            if how:
+                self._note_action()
+                self.approved += 1
+                self.log(f"  APPROVED via {how}", "ACTION")
+                self.log(f"  total approved this session: {self.approved}")
+            else:
+                self.log("  FAILED: bubble still present after keyboard fallback - retrying next sweep", "ERROR")
+        for stale in [s for s in self._counts if s not in counts]:
+            del self._counts[stale]
+        if len(self._counts) > DEDUPE_MAX:
+            for s in list(self._counts)[:len(self._counts) - DEDUPE_MAX]:
+                del self._counts[s]
 
     def probe(self):
         """Dump the AT-SPI tree around Chrome for porting work. No clicks."""
