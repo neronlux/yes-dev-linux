@@ -2,7 +2,7 @@
 """Yes, Dev engine for Linux: watch for Chrome's "Allow remote debugging?"
 consent dialog through AT-SPI.
 
-Status: v0.8.13. Detection via AT-SPI is proven live (titled dialogs by
+Status: v0.8.14. Detection via AT-SPI is proven live (titled dialogs by
 title, untitled Wayland bubbles by window-geometry child totals).
 Auto-approval works via a visual pipeline, proven end-to-end on
 2026-09-22: xdg-desktop-portal screenshot (no prompt) -> PIL finds the
@@ -105,7 +105,7 @@ except Exception:
         "and run with the distro python: /usr/bin/python3 watcher_linux.py"
     )
 
-VERSION = "0.8.13"
+VERSION = "0.8.14"
 
 DIALOG_PATTERN = re.compile(r"^allow remote debugging\??$", re.I)
 APPROVE_PATTERN = re.compile(r"^(allow|approve)$", re.I)

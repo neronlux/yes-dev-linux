@@ -387,15 +387,20 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, the offline test
 suite, calibration captures, code conventions, and the release process.
 
 Hit a real prompt? While it is up, run
-`/usr/bin/python3 auto_click.py --shot /tmp/shot.png` and
-`--detect /tmp/shot.png`, and open an issue with the result and your
-Chrome version — that is how new layouts get calibrated. Reliable
+`/usr/bin/python3 auto_click.py --shot /tmp/shot.png`,
+`--detect /tmp/shot.png` and `--clusters /tmp/shot.png`, then open an
+issue with the **Calibration capture** template (it walks you through
+the cluster data, environment and screenshot) — that is how new layouts
+get calibrated. Reliable
 trigger: `tools/consent-check.py` (attach via
 `npx -y chrome-devtools-mcp@latest --autoConnect` and call `list_pages`;
 the call hangs mid-handshake while the prompt is up).
 
 ## History
 
+- **v0.8.14** — one docs link fixed (the Contributing section now names
+  the Calibration capture template and `--clusters`). Engine unchanged
+  since v0.8.12.
 - **v0.8.13** — hygiene release: GitHub "Calibration capture" issue
   template (cluster data, --detect output, environment, screenshot) so
   restyle reports arrive in a usable shape; .editorconfig; brew caveats
