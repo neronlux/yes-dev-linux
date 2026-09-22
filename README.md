@@ -9,14 +9,16 @@ macOS, MIT). This repo is the unofficial Linux port: same log contract
 (`[ACTION]` lines), same option shapes, different guts (AT-SPI instead of
 UI Automation / Accessibility API).
 
-> **Status: v0.7 — auto-approval works, proven end to end.** The engine
-> detects the consent bubble through AT-SPI, screenshots it through
-> xdg-desktop-portal, finds the Allow button visually, and clicks it
-> through a dedicated absolute uinput pointer. A genuinely hung CDP
-> client then completes its handshake — measured at ~1 second from
-> bubble to grant, unattended. On GNOME/Wayland the button is invisible
-> to every automation API, which is why the click is visual; details and
-> the full field record are in [TESTING.md](TESTING.md).
+> **Status: v0.8 — auto-approval works, proven end to end, and the
+> service is boot-safe.** The engine detects the consent bubble through
+> AT-SPI, screenshots it through xdg-desktop-portal, finds the Allow
+> button visually, and clicks it through a dedicated absolute uinput
+> pointer. A genuinely hung CDP client then completes its handshake —
+> measured at ~1 second from bubble to grant, unattended. Started at
+> boot (before the desktop exists) it waits and re-acquires every
+> dependency until the session is up. On GNOME/Wayland the button is
+> invisible to every automation API, which is why the click is visual;
+> details and the full field record are in [TESTING.md](TESTING.md).
 
 ## Why this exists
 
@@ -108,8 +110,11 @@ No `pip install` — use the distro python (it ships `python3-gi`).
 Auto-click needs the visual + input stack as distro packages:
 
 ```bash
-sudo apt install python3-gi gir1.2-atspi-2.0 python3-pil python3-evdev dbus
+sudo apt install python3-gi gir1.2-atspi-2.0 python3-pil python3-evdev python3-dbus
 ```
+
+(`python3-dbus` is dbus-python, used for the portal screenshot — the
+plain `dbus` daemon package is not enough.)
 
 and the user must be able to write `/dev/uinput` (a udev rule giving the
 `input` group access, e.g. `KERNEL=="uinput", MODE="0660", GROUP="input"`,
@@ -174,11 +179,32 @@ Setup (already done on the author's VM; repeat anywhere):
 ```bash
 # 1. persistent copy outside scratch space
 git clone https://github.com/neronlux/yes-dev-linux.git ~/yes-dev-linux
-# 2. unit file at ~/.config/systemd/user/yes-dev.service:
-#    ExecStart=/usr/bin/python3 /home/USER/yes-dev-linux/watcher_linux.py --enable-click
+
+# 2. unit file at ~/.config/systemd/user/yes-dev.service (adjust the
+#    /home paths):
+cat > ~/.config/systemd/user/yes-dev.service <<'EOF'
+[Unit]
+Description=Yes, Dev Linux engine (Chrome remote-debugging auto-approver)
+Documentation=https://github.com/neronlux/yes-dev-linux
+After=dbus.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/USER/yes-dev-linux/watcher_linux.py --enable-click
+WorkingDirectory=/home/USER/yes-dev-linux
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+
+# 3. activate
 systemctl --user daemon-reload
 systemctl --user enable --now yes-dev.service
-# 3. reboot survival needs lingering (usually already on):
+
+# 4. reboot survival needs lingering (usually already on):
 loginctl enable-linger $USER
 ```
 
@@ -240,14 +266,18 @@ wherever you do not need real browser state.
   verified with Chrome focused). The screenshot search would still find
   the buttons only if the dialog is visible.
 
-## Contributing captures
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, the offline test
+suite, calibration captures, code conventions, and the release process.
 
 Hit a real prompt? While it is up, run
 `/usr/bin/python3 auto_click.py --shot /tmp/shot.png` and
 `--detect /tmp/shot.png`, and open an issue with the result and your
 Chrome version — that is how new layouts get calibrated. Reliable
-trigger: attach once via `npx -y chrome-devtools-mcp@latest --autoConnect`
-and call `list_pages` (the call hangs mid-handshake while the prompt is up).
+trigger: `tools/consent-check.py` (attach via
+`npx -y chrome-devtools-mcp@latest --autoConnect` and call `list_pages`;
+the call hangs mid-handshake while the prompt is up).
 
 ## History
 

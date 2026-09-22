@@ -18,19 +18,20 @@ procedure plus the field notes so far.
 ## Stage 1 — reproduce the hang (safe, no restart)
 
 ```bash
-/usr/bin/python3 /tmp/consent-check.py   # autoConnect + list_pages, 12s window
+/usr/bin/python3 tools/consent-check.py 12   # autoConnect + list_pages, 12s window
 ```
 
 - `RESPONDED` quickly → consent already granted; go to Stage 3.
 - `HUNG` → a prompt is (probably) up. Go to Stage 2.
 
-Record the trigger script (kept short on purpose):
+The script (`tools/consent-check.py`, kept short on purpose):
 
 ```python
 # spawn: npx -y chrome-devtools-mcp@latest --autoConnect (stdio)
 # send: initialize -> notifications/initialized -> tools/call list_pages
-# a hung call with no reply in 12s == consent gate (or a sick server;
-# rule that out first: `ss -tlnp | grep 9222` must show chrome listening)
+# a hung call with no reply in the window == consent gate (or a sick
+# server; rule that out first: `ss -tlnp | grep 9222` must show chrome
+# listening)
 ```
 
 ## Stage 2 — capture the dialog (the money step)
@@ -184,6 +185,27 @@ relative-device absolute moves, blind Enter (`Esc` burns the grant,
 focus is unpredictable), AT-SPI Collection walks (Chrome exposes no
 objects on Wayland), and F6/Tab focus walks.
 
+## v0.8 — boot-safety (same day, ctd.)
+
+The systemd unit starts at boot ~11s before the desktop session on the
+author's VM, and v0.7's clicker failure **latched permanently** — the
+first unavailable probe before Mutter existed would have disabled
+auto-click until a manual restart. Fixes, each with an offline check in
+`tests/test_selfheal.py` (8/8 pass) plus a live regression after
+restart (candidate → click → `[ACTION]`, client 11.5s):
+
+- pointer creation retried every 15s (`_get_clicker`), logged once, no
+  latch;
+- pointer rebuilt when the screenshot size changes — also covers RDP
+  resolution changes between sessions;
+- AT-SPI re-initialised after 20 consecutive failed scans (`Atspi.init`),
+  counter resets on any success;
+- a failed screenshot or scan only warns for that sweep; the next sweep
+  retries.
+
+Real reboot still unverified (the author's session dies with the VM);
+post-reboot checklist lives in README ("Staying up").
+
 ## Stage 3 — fresh prompt (needs a Chrome restart)
 
 Consent resets on restart. This kills the main browser (tabs restore;
@@ -195,9 +217,13 @@ approval first.
 2. Note the active tab URL (misfire check later).
 3. Restart Chrome (session restore on).
 4. Trigger Stage 1. Expect: HUNG + count bump on the ACTIVE frame.
-5. Watch `tail -f ~/.local/share/YesDev/yes-dev.log` for:
-   `dialog candidate` → `host ACTIVE` → `APPROVED via ydotool:Enter`
-   (`[ACTION]`), and the MCP call responding.
+5. Watch `tail -f ~/.local/share/YesDev/yes-dev.log` for the current
+   contract: `untitled bubble candidate` → `armed - will click Allow
+   when found` → `visual approve: clicking Allow at (x, y)` →
+   `APPROVED via abs-pointer click (x, y)` (`[ACTION]`), and the MCP
+   call responding. (A first click is sometimes swallowed during the
+   bubble's entry animation; the engine retries and logs
+   `FAILED 1/3` in between.)
 6. Misfire checks: active tab URL unchanged, no stray bookmark/download
    bubbles approved, no text entered anywhere.
 
