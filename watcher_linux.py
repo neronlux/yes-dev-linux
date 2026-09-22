@@ -2,18 +2,23 @@
 """Yes, Dev engine for Linux: watch for Chrome's "Allow remote debugging?"
 consent dialog through AT-SPI.
 
-Status: v0.8.2. Detection via AT-SPI is proven live (titled dialogs by
+Status: v0.8.3. Detection via AT-SPI is proven live (titled dialogs by
 title, untitled Wayland bubbles by window-geometry child totals).
 Auto-approval works via a visual pipeline, proven end-to-end on
 2026-09-22: xdg-desktop-portal screenshot (no prompt) -> PIL finds the
 rightmost blue button = Allow -> click through a dedicated ABSOLUTE
 uinput pointer (1:1 with the logical desktop; ydotool's relative device
 is accel-warped and misses). The hung CDP client then completes its
-handshake. Gates: --enable-click (off by default), --observe always
-wins, burst guard, 3 attempts per cycle with a --cool-off-s pause
-(default 30s) before a fresh cycle, and [ACTION] is logged only after
-the bubble is verified gone. The AT-SPI Action path (below) still
-serves stacks that expose the button (X11).
+handshake. Verification is visual (a fresh screenshot no longer shows
+the button); child totals are a second signal only because queued
+attaches leak nodes. If no button is visible the engine raises the host
+window with one uncovered-corner click (another app covering Chrome
+hides the bubble and swallows every click - observed live) and stands
+down after 3 empty looks. Gates: --enable-click (off by default),
+--observe always wins, burst guard, 3 attempts per cycle with a
+--cool-off-s pause (default 30s) and a fresh pointer before the next
+cycle, and [ACTION] is logged only after verification. The AT-SPI
+Action path (below) still serves stacks that expose the button (X11).
 
 Boot-safe: the systemd user service starts before the desktop exists
 (linger + default.target), so every dependency is re-acquired lazily and
@@ -97,7 +102,7 @@ TEST_NAMES = ("Google Chrome for Testing",)
 POLL_MS_DEFAULT = 250
 DEDUPE_SECONDS = 2.0
 DEDUPE_MAX = 400
-VERIFY_WAIT_S = 0.5
+VERIFY_WAIT_S = 0.8
 # Minimal burst guard (the tray owns the real one upstream; this keeps an
 # unsupervised engine from approving a runaway loop forever).
 BURST_LIMIT_DEFAULT = 60   # approvals per window before pausing clicks
@@ -106,6 +111,7 @@ BURST_PAUSE_S = 60.0
 CLICK_MAX_ATTEMPTS = 3     # per cycle, then cool off and start a fresh one
 CLICK_RETRY_S = 1.0        # minimum gap between click attempts on one bubble
 CLICK_COOL_OFF_S = 30.0    # pause between attempt cycles (0 = wait for clear)
+NO_BUTTON_STOP = 3         # consecutive no-button looks before standing down
 CLICKER_RETRY_S = 15.0     # re-try clicker creation (boot order, RDP resize)
 ATSPI_REINIT_AFTER = 20    # consecutive failed scans before re-initialising
 
@@ -207,6 +213,8 @@ class Engine:
         self.burst_limit = burst_limit
         self.cool_off_s = cool_off_s
         self._cycle_next: dict[str, float] = {}
+        self._nobutton: dict[str, int] = {}
+        self._raised: set[str] = set()
         self.enable_click = enable_click and not observe
         self._action_times: deque[float] = deque()
         self._burst_paused_until = 0.0
@@ -414,6 +422,98 @@ class Engine:
         self.log(f"auto-click ready: absolute pointer {clicker.size}", "INFO")
         return clicker
 
+    def _drop_clicker(self, why: str) -> None:
+        """Release the pointer device so the next cycle builds a fresh one.
+
+        Empirically a long-lived device stops delivering clicks in some
+        session states (seat/RDP churn) while a freshly created identical
+        device delivers immediately - observed live 2026-09-22: the
+        engine's device failed every click for minutes while a fresh CLI
+        click approved the same bubble first try. Recreating is cheap.
+        """
+        if self._clicker is None:
+            return
+        try:
+            self._clicker.close()
+        except Exception:
+            pass
+        self._clicker = None
+        self.log(f"  released the pointer device ({why}) - the next cycle "
+                 f"creates a fresh one", "WARN")
+
+    def _host_raise_point(self, bounds) -> tuple[int, int] | None:
+        """A point inside the host window not covered by another app.
+
+        Other apps' top-level windows are read from AT-SPI (Chrome's own
+        windows are ignored - clicking another Chrome window still raises
+        Chrome). Preference order is window edges and bottom corners,
+        away from tabs, toolbars and window controls.
+        """
+        x, y, w, h = bounds
+        if w < 120 or h < 120:
+            return None
+        covered = []
+        try:
+            desk = Atspi.get_desktop(0)
+        except Exception:
+            return None
+        for app in _children(desk):
+            try:
+                aname = (app.get_name() or '').lower()
+            except Exception:
+                continue
+            if 'chrome' in aname or 'chromium' in aname or 'edge' in aname:
+                continue
+            for fr in _children(app):
+                b = _bounds(fr)
+                if b and b[2] >= 200 and b[3] >= 200:
+                    covered.append(b)
+        cands = [
+            (x + w - 14, y + h - 14),   # bottom-right
+            (x + w // 2, y + h - 14),   # bottom-centre
+            (x + 20, y + h - 14),       # bottom-left
+            (x + w - 14, y + h // 2),   # mid-right
+            (x + w - 14, y + 60),       # upper-right, below the tab strip
+        ]
+        for px, py in cands:
+            if all(not (cx <= px < cx + cw and cy <= py < cy + ch)
+                   for cx, cy, cw, ch in covered):
+                return (px, py)
+        return None
+
+    def _raise_host(self, dkey: str) -> bool:
+        """Click an uncovered point of the bubble's host window to raise it.
+
+        On Wayland clicks only reach the active window: when another app
+        covers the host, the bubble is invisible to screenshots and every
+        click vanishes into the covering window (observed live 2026-09-22:
+        a second app's window hid the bubble for an hour; a corner click
+        raised Chrome and the bubble reappeared). Once per bubble.
+        """
+        if dkey in self._raised:
+            return False
+        self._raised.add(dkey)
+        try:
+            _, _, rect = dkey.split(":", 2)
+            xs, ys, wh = rect.split(",")
+            w, h = wh.split("x")
+            bounds = (int(xs), int(ys), int(w), int(h))
+        except Exception:
+            return False
+        pt = self._host_raise_point(bounds)
+        if pt is None:
+            return False
+        if auto_click is None:
+            return False
+        shot = auto_click._portal_screenshot()
+        size = auto_click.image_size(shot) if shot else None
+        clicker = self._get_clicker(size)
+        if clicker is None or not clicker.click(*pt):
+            return False
+        self.log(f"  clicked an uncovered corner {pt} to raise the host window "
+                 f"(it was covered or inactive)", "AUDIT")
+        return True
+
     def _note_scan(self, ok: bool) -> None:
         """Re-init AT-SPI after a run of failures: at boot the a11y bus can
         start after us, and a connection made too early never heals."""
@@ -430,43 +530,60 @@ class Engine:
                 self.log(f"AT-SPI re-init failed: {exc!r}", "ERROR")
             self._scan_errors = 0
 
-    def _approve_visual(self, dkey: str, baseline: int) -> str | None:
-        """Screenshot -> find Allow -> click it. Returns a how-string only
-        if the bubble total returned to baseline afterwards."""
+    def _approve_visual(self, dkey: str, baseline: int) -> tuple[str, str | None]:
+        """Screenshot -> find Allow -> click it -> verify visually.
+
+        Returns (status, detail):
+        - ("approved", how)   the click was emitted and a fresh screenshot
+          no longer shows the button;
+        - ("no-button", None) the button is not in the screenshot at all
+          (bubble already gone, or not renderable);
+        - ("failed", None)    the button is still visible after the click.
+
+        Child totals are a second signal only. Queued/orphaned attaches
+        leak nodes: a bubble that is gone can leave the window's child
+        total elevated indefinitely (observed live 2026-09-22), so the
+        totals alone cannot decide whether a click landed.
+        """
         if auto_click is None:
-            return None
+            return "failed", None
         shot = auto_click._portal_screenshot()
         if not shot:
             self.log("  screenshot failed (xdg-desktop-portal?)", "WARN")
-            return None
+            return "failed", None
         size = auto_click.image_size(shot)
         clicker = self._get_clicker(size)
         if clicker is None:
-            return None
+            return "failed", None
         pt = auto_click.find_allow_button(shot)
+        if pt is None and self._raise_host(dkey):
+            time.sleep(VERIFY_WAIT_S)
+            shot = auto_click._portal_screenshot() or shot
+            pt = auto_click.find_allow_button(shot)
         if pt is None:
-            self.log("  Allow button not found in screenshot - left alone", "WARN")
-            return None
-        self.log(f"  visual approve: clicking Allow at {pt}", "AUDIT")
+            return "no-button", None
+        where = f"{pt} on {size[0]}x{size[1]}" if size else str(pt)
+        self.log(f"  visual approve: clicking Allow at {where}", "AUDIT")
         if not clicker.click(*pt):
             self.log("  click emit failed", "WARN")
-            return None
+            return "failed", None
         time.sleep(VERIFY_WAIT_S)
         try:
-            cur = self._rect_snapshot()
+            after = auto_click._portal_screenshot()
         except Exception:
-            return None
-        # Any window whose total is back at/below its own pre-bubble value is
-        # the clearest signal we can get that the click landed. The bubble's
-        # host is the window this candidate key belongs to.
-        try:
-            key = tuple(dkey.split(":", 2)[1:])  # "bubble:<app>:<rect>"
-            e = cur.get((key[0], key[1]))
-            if e is None or e["total"] <= baseline:
-                return f"abs-pointer click {pt}"
-        except Exception:
-            return None
-        return None
+            after = None
+        if after and auto_click.find_allow_button(after) is None:
+            # Visual verify: the button is gone -> the bubble is dismissed.
+            try:
+                key = tuple(dkey.split(":", 2)[1:])  # "bubble:<app>:<rect>"
+                e = self._rect_snapshot().get((key[0], key[1]))
+                if e is not None and e["total"] > baseline:
+                    self.log("  (child total still elevated - queued attaches "
+                             "leak nodes; visual verify says gone)", "INFO")
+            except Exception:
+                pass
+            return "approved", f"abs-pointer click {pt}"
+        return "failed", None
 
     def _rect_snapshot(self) -> dict:
         """(app, rect) -> {frames, total, titled, kind, frame}: child totals
@@ -594,6 +711,8 @@ class Engine:
                     self._click_attempts.pop(dkey, None)
                     self._cycle_next.pop(dkey, None)
                     self._click_last.pop(dkey, None)
+                    self._nobutton.pop(dkey, None)
+                    self._raised.discard(dkey)
                 continue
             # A bump happened. First time: record the base and announce.
             if dkey not in self._pending:
@@ -625,9 +744,10 @@ class Engine:
                 if now < self._cycle_next.get(dkey, 0.0):
                     continue
                 self._click_attempts[dkey] = 0
+                attempts = 0
                 self._cycle_next.pop(dkey, None)
                 self.log(f"  cool-off elapsed - fresh {CLICK_MAX_ATTEMPTS}-attempt "
-                         f"cycle on this bubble", "INFO")
+                         f"cycle on this bubble (pointer device re-created)", "INFO")
             last_try = self._click_last.get(dkey, 0.0)
             if now - last_try < CLICK_RETRY_S:
                 continue
@@ -635,24 +755,48 @@ class Engine:
                 self.log("  burst-paused - not clicking", "WARN")
                 continue
             self._click_last[dkey] = now
-            how = self._approve_visual(dkey, base)
-            if how:
+            status, how = self._approve_visual(dkey, base)
+            if status == "approved":
                 self._note_action()
                 self._pending.pop(dkey, None)
                 self._click_attempts.pop(dkey, None)
                 self._cycle_next.pop(dkey, None)
                 self._click_last.pop(dkey, None)
+                self._nobutton.pop(dkey, None)
+                self._raised.discard(dkey)
                 self.approved += 1
                 self.log(f"  APPROVED via {how}", "ACTION")
                 self.log(f"  total approved this session: {self.approved}")
+            elif status == "no-button":
+                # No visible button: the bubble is gone (dismissed elsewhere,
+                # or a leaked child total is all that remains) or it is not
+                # renderable. Stand down after a couple of looks instead of
+                # cycling forever on a phantom.
+                nb = self._nobutton.get(dkey, 0) + 1
+                if nb >= NO_BUTTON_STOP:
+                    self.log(f"  no Allow button visible {nb}x - leaving this window "
+                             f"alone (a new child bump re-arms)", "WARN")
+                    self._pending.pop(dkey, None)
+                    self._click_attempts.pop(dkey, None)
+                    self._cycle_next.pop(dkey, None)
+                    self._click_last.pop(dkey, None)
+                    self._nobutton.pop(dkey, None)
+                    self._raised.discard(dkey)
+                else:
+                    self._nobutton[dkey] = nb
+                    self.log(f"  Allow button not visible ({nb}/{NO_BUTTON_STOP}) - "
+                             f"bubble may already be gone", "WARN")
             else:
+                self._nobutton.pop(dkey, None)
+                self._raise_host(dkey)  # activate/raise before the retry
                 attempts += 1
                 self._click_attempts[dkey] = attempts
                 if attempts >= CLICK_MAX_ATTEMPTS:
                     self._cycle_next[dkey] = now + self.cool_off_s
+                    self._drop_clicker("cycle exhausted")
                     self.log(f"  FAILED {attempts}/{CLICK_MAX_ATTEMPTS}: bubble still "
                              f"present - cooling off {int(self.cool_off_s)}s, then a "
-                             f"fresh cycle", "ERROR")
+                             f"fresh cycle with a new pointer", "ERROR")
                 else:
                     self.log(f"  FAILED {attempts}/{CLICK_MAX_ATTEMPTS}: bubble still "
                              f"present after click - will retry", "WARN")
@@ -664,6 +808,8 @@ class Engine:
             self._click_attempts.pop(stale, None)
             self._cycle_next.pop(stale, None)
             self._click_last.pop(stale, None)
+            self._nobutton.pop(stale, None)
+            self._raised.discard(stale)
         if len(self._rects) > DEDUPE_MAX:
             for s in list(self._rects)[:len(self._rects) - DEDUPE_MAX]:
                 del self._rects[s]

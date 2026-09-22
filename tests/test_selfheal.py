@@ -101,6 +101,15 @@ e._note_scan(False)
 check("counter resets on a successful scan", len(reinit_calls) == 1)
 w.Atspi = saved_init
 
+# 4. dropping the pointer device forces a fresh one on the next use
+#    (a long-lived device can stop delivering clicks; observed live).
+c5 = e._get_clicker((1280, 800))
+e._drop_clicker("test")
+check("drop releases the cached device", e._clicker is None)
+c6 = e._get_clicker((1280, 800))
+check("next get builds a fresh device",
+      c6 is not None and c6 is not c5 and c6.size == (1280, 800))
+
 w.CLICKER_RETRY_S = saved_retry
 print(f"\n{'FAILURES: ' + ', '.join(failures) if failures else 'ALL PASS'}")
 sys.exit(1 if failures else 0)

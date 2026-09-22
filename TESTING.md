@@ -209,6 +209,37 @@ restart (candidate → click → `[ACTION]`, client 11.5s):
 Real reboot still unverified (the author's session dies with the VM);
 post-reboot checklist lives in README ("Staying up").
 
+## v0.8.3 — the covering-window incident (same day, ctd.)
+
+After the v0.8.2 e2e passed, sessions still stalled: the gate was up,
+child totals bumped, but every screenshot said `Allow button not found`
+and every click vanished. Root cause found by elimination: a second
+app's window (`grok-bot`, 1023x665) sat over Chrome — the bubble was
+hidden under it and all clicks went to the covering window. Giving the
+scene focus is also load-bearing: on Wayland only the active window
+receives clicks, which is why a bubble click sometimes needed a second
+attempt (first click activates, second lands).
+
+Evidence and the fixes:
+
+- A corner click at (1150,720) — inside Chrome (1213x768) but outside
+  the covering window — raised Chrome (`AT-SPI active` flipped) and the
+  bubble reappeared in the very next screenshot (`--detect` found it).
+- v0.8.3 therefore: raises the host window itself (one uncovered-corner
+  click, computed from other apps' AT-SPI frame bounds) when no button
+  is visible, and raises after a failed click before retrying;
+- verifies approval visually (fresh screenshot no longer shows the
+  button) because child totals leak with queued/orphaned attaches and
+  claimed bubbles were still present long after they were gone;
+- stands down after 3 no-button looks instead of cycling on a phantom;
+- cools off between failed 3-attempt cycles and rebuilds the pointer
+  device (a long-lived device once stopped delivering while a fresh
+  one approved immediately).
+
+Live validation, 19:46: fresh attach -> candidate -> first click
+swallowed (focus race) -> retry -> `APPROVED via abs-pointer click
+(837, 363)` -> client answered with its page list, no block.
+
 ## Stage 3 — fresh prompt (needs a Chrome restart)
 
 Consent resets on restart. This kills the main browser (tabs restore;

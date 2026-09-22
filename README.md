@@ -76,11 +76,17 @@ scan Chrome app frames (AT-SPI, title match, max 1 level deep)
   |                                                   the lower dialog area
   |                                                   = Allow
   |                                                -> click via absolute pointer
-  |                                                -> totals back to base?
-  |                                                   YES -> [ACTION], count++
+  |                                                -> fresh screenshot: button
+  |                                                   gone? YES -> [ACTION]
   |                                                   NO  -> retry (1s gap,
-  |                                                          max 3, then wait
-  |                                                          for it to clear)
+  |                                                          max 3, then 30s
+  |                                                          cool-off, fresh
+  |                                                          cycle + new pointer)
+  |                                                -> button not in the shot?
+  |                                                   raise host (one
+  |                                                   uncovered-corner click)
+  |                                                   and re-shoot; 3 empty
+  |                                                   looks -> stand down
   |
   +-- match     -->  dedupe (2s window, geometry signature)
                        |
@@ -97,7 +103,10 @@ Rules the engine never breaks:
   Never by rescan-absence alone, and never by screen geometry.
 - **Click only what the screenshot shows.** The Allow button is located in
   a live full-screen capture, so if the bubble is occluded or the layout is
-  unexpected, detection finds no button pair and nothing is clicked.
+  unexpected, detection finds no button pair and nothing is clicked. The
+  one other click the engine may emit is a single uncovered-corner click
+  to *raise the bubble's host window* when it is covered or inactive —
+  never in the dialog area, never more than once per bubble.
 - **Off by default.** Auto-click needs `--enable-click`; `--observe` always
   wins, and the burst guard pauses clicking if approvals spike.
 - **One engine.** A second copy exits on the single-instance lock instead
@@ -241,7 +250,8 @@ the same one upstream's tray makes. This port ships with:
 - at most 3 click attempts per cycle, then a `--cool-off-s` pause
   (default 30s) before a fresh cycle — never hammering;
 - a click that only ever fires on a button found in a live screenshot,
-  so an occluded or unexpected dialog is left untouched.
+  so an occluded or unexpected dialog is left untouched — plus at most
+  one uncovered-corner click per bubble to raise a covered host window.
 
 Run `--observe` first, and prefer a throwaway `--user-data-dir` profile
 wherever you do not need real browser state.
@@ -265,9 +275,15 @@ wherever you do not need real browser state.
 - No tray, no stay-on timer, no ask-first burst dialog yet. The engine
   refuses double-run via the lock and `--exit-with-parent` is available
   for supervised launches.
-- Untested: a bubble on a non-focused Chrome window (clicks here were
-  verified with Chrome focused). The screenshot search would still find
-  the buttons only if the dialog is visible.
+- **Covered or inactive host window**: only the active window receives
+  clicks on Wayland. If another app covers Chrome (observed live: a
+  second app's window hid the bubble for an hour), or the shell holds
+  focus, the engine raises the host with one uncovered-corner click and
+  retries. If the bubble is still not visible after 3 looks it stands
+  down on that window and logs it — switch to the covered window by hand
+  and a new attach re-arms it.
+- Untested: a bubble host on another workspace (raise clicks can only
+  reach the current workspace; the stand-down covers it).
 
 ## Contributing
 
@@ -284,6 +300,17 @@ the call hangs mid-handshake while the prompt is up).
 
 ## History
 
+- **v0.8.3** — reliability batch, after a live incident where a second
+  app's window covered Chrome for an hour: clicks vanish on a covered or
+  inactive window, so now (1) the engine raises the host with one
+  uncovered-corner click and re-shoots when no button is visible, and
+  retries raise the host after a failed click; (2) approval is verified
+  visually (fresh screenshot no longer shows the button) — child totals
+  leak with queued attaches and were lying; (3) 3 consecutive
+  no-button looks stand the engine down instead of cycling forever on a
+  phantom; (4) cool-off cycles re-arm the attempt counter correctly.
+  Validated live: raise-click revealed a hidden bubble; full e2e after
+  (candidate → click → APPROVED, client answered).
 - **v0.8.2** — cool-off + retry cycles: a bubble that survives 3
   attempts no longer waits forever for it to clear; the engine pauses
   `--cool-off-s` (default 30s) and starts a fresh cycle. Found live:

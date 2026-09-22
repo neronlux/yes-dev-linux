@@ -105,7 +105,9 @@ rejected regardless of other merit:
    Never rescan-absence, never screen geometry.
 2. **Click only what the screenshot shows.** No blind coordinates, no
    keyboard fallbacks without focus knowledge (TESTING.md part 2/4 is
-   the graveyard — read it before proposing one).
+   the graveyard — read it before proposing one). The single exception
+   is the uncovered-corner raise click for a covered/inactive host
+   window: once per bubble, never in the dialog area.
 3. **Off by default.** `--enable-click` stays opt-in; `--observe` always
    wins.
 4. **Burst guard + attempt cap stay.** 3 attempts per cycle, `--cool-off-s`
