@@ -150,6 +150,7 @@ brew install yes-dev-linux
 | `--dialog-pattern` | Dialog title regex (default `^allow remote debugging\?$`). Localised Chrome? Start here. |
 | `--approve-pattern` | Button label regex (default `^(allow\|approve)$`). Anchored so *Turn off in settings* is never hit. |
 | `--burst-limit` | Pause clicks 60s after this many approvals/min (default 60, `0` disables). Same default as upstream, measured not guessed. |
+| `--cool-off-s` | After 3 failed click attempts on one bubble, pause this long, then start a fresh 3-attempt cycle (default 30, `0` = old wait-forever). |
 | `--exit-with-parent` | Exit when the launching process goes away (for supervised runs). |
 | `--diagnostics` | Log scan timing every 5s. |
 | `--log-path` | Default `~/.local/share/YesDev/yes-dev.log`. |
@@ -237,8 +238,8 @@ the same one upstream's tray makes. This port ships with:
 - `--enable-click` off by default, and `--observe` always wins over it;
 - a burst guard (pause clicks 60s after 60 approvals/min, same default as
   upstream);
-- at most 3 click attempts per bubble, then it waits for the bubble to
-  clear rather than hammering;
+- at most 3 click attempts per cycle, then a `--cool-off-s` pause
+  (default 30s) before a fresh cycle — never hammering;
 - a click that only ever fires on a button found in a live screenshot,
   so an occluded or unexpected dialog is left untouched.
 
@@ -255,7 +256,9 @@ wherever you do not need real browser state.
   `auto_click.py --detect shot.png` on a real prompt.
 - **Invisible-snapshot race**: the first click is occasionally swallowed
   while the bubble animates in; the engine retries after ~1s. A bubble
-  that survives 3 attempts is left until it clears.
+  that survives a full 3-attempt cycle cools off (`--cool-off-s`, 30s
+  default) and then starts a fresh cycle, so a stuck bubble self-heals
+  instead of needing a human.
 - **English Chrome only** (same as upstream): matched by title string —
   but `--dialog-pattern`/`--approve-pattern` are exposed flags, so a
   localised build can be attempted without code changes.
@@ -281,6 +284,13 @@ the call hangs mid-handshake while the prompt is up).
 
 ## History
 
+- **v0.8.2** — cool-off + retry cycles: a bubble that survives 3
+  attempts no longer waits forever for it to clear; the engine pauses
+  `--cool-off-s` (default 30s) and starts a fresh cycle. Found live:
+  a bubble whose clicks were all swallowed sat stuck after the old
+  permanent backoff.
+- **v0.8.1** — docs release (CONTRIBUTING.md, tests/, tools/ in the
+  tarball; formula caveats corrected to python3-dbus). Engine unchanged.
 - **v0.8** — boot-safe: clicker creation retried every 15s (a latched
   failure would have booted dead when the service started before the
   desktop), rebuild on screenshot-size change (RDP resize), AT-SPI

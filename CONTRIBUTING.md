@@ -108,8 +108,8 @@ rejected regardless of other merit:
    the graveyard — read it before proposing one).
 3. **Off by default.** `--enable-click` stays opt-in; `--observe` always
    wins.
-4. **Burst guard + attempt cap stay.** 3 attempts per bubble, then wait
-   for it to clear.
+4. **Burst guard + attempt cap stay.** 3 attempts per cycle, `--cool-off-s`
+   pause between cycles (default 30s), approvals only after verification.
 
 ## Release process (maintainers)
 

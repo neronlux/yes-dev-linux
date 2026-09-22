@@ -2,7 +2,7 @@
 """Yes, Dev engine for Linux: watch for Chrome's "Allow remote debugging?"
 consent dialog through AT-SPI.
 
-Status: v0.8. Detection via AT-SPI is proven live (titled dialogs by
+Status: v0.8.2. Detection via AT-SPI is proven live (titled dialogs by
 title, untitled Wayland bubbles by window-geometry child totals).
 Auto-approval works via a visual pipeline, proven end-to-end on
 2026-09-22: xdg-desktop-portal screenshot (no prompt) -> PIL finds the
@@ -10,8 +10,9 @@ rightmost blue button = Allow -> click through a dedicated ABSOLUTE
 uinput pointer (1:1 with the logical desktop; ydotool's relative device
 is accel-warped and misses). The hung CDP client then completes its
 handshake. Gates: --enable-click (off by default), --observe always
-wins, burst guard, 3 attempts per bubble, and [ACTION] is logged only
-after the bubble is verified gone. The AT-SPI Action path (below) still
+wins, burst guard, 3 attempts per cycle with a --cool-off-s pause
+(default 30s) before a fresh cycle, and [ACTION] is logged only after
+the bubble is verified gone. The AT-SPI Action path (below) still
 serves stacks that expose the button (X11).
 
 Boot-safe: the systemd user service starts before the desktop exists
@@ -102,8 +103,9 @@ VERIFY_WAIT_S = 0.5
 BURST_LIMIT_DEFAULT = 60   # approvals per window before pausing clicks
 BURST_WINDOW_S = 60.0
 BURST_PAUSE_S = 60.0
-CLICK_MAX_ATTEMPTS = 3     # per bubble, then back off until it clears
+CLICK_MAX_ATTEMPTS = 3     # per cycle, then cool off and start a fresh one
 CLICK_RETRY_S = 1.0        # minimum gap between click attempts on one bubble
+CLICK_COOL_OFF_S = 30.0    # pause between attempt cycles (0 = wait for clear)
 CLICKER_RETRY_S = 15.0     # re-try clicker creation (boot order, RDP resize)
 ATSPI_REINIT_AFTER = 20    # consecutive failed scans before re-initialising
 
@@ -192,7 +194,8 @@ class Engine:
                  include_edge=False, log_path=LOG_PATH,
                  exit_with_parent=False, diagnostics=False,
                  dialog_pattern=DIALOG_PATTERN, approve_pattern=APPROVE_PATTERN,
-                 burst_limit=BURST_LIMIT_DEFAULT, enable_click=False):
+                 burst_limit=BURST_LIMIT_DEFAULT, enable_click=False,
+                 cool_off_s=CLICK_COOL_OFF_S):
         self.observe = observe
         self.poll_s = max(0.05, poll_ms / 1000.0)
         self.include_edge = include_edge
@@ -202,6 +205,8 @@ class Engine:
         self.dialog_pattern = dialog_pattern
         self.approve_pattern = approve_pattern
         self.burst_limit = burst_limit
+        self.cool_off_s = cool_off_s
+        self._cycle_next: dict[str, float] = {}
         self.enable_click = enable_click and not observe
         self._action_times: deque[float] = deque()
         self._burst_paused_until = 0.0
@@ -587,6 +592,7 @@ class Engine:
                 if base is not None and e["total"] <= base:
                     self._pending.pop(dkey, None)
                     self._click_attempts.pop(dkey, None)
+                    self._cycle_next.pop(dkey, None)
                     self._click_last.pop(dkey, None)
                 continue
             # A bump happened. First time: record the base and announce.
@@ -610,7 +616,18 @@ class Engine:
                 continue
             attempts = self._click_attempts.get(dkey, 0)
             if attempts >= CLICK_MAX_ATTEMPTS:
-                continue  # backed off; a new bump re-arms it
+                # Cycle exhausted. Cool off, then start a fresh cycle - a
+                # stuck bubble (occluded window, animation race, pointer
+                # hiccup) recovers on its own instead of needing a new bump
+                # or a human. cool_off_s <= 0 restores the old wait-forever.
+                if self.cool_off_s <= 0:
+                    continue
+                if now < self._cycle_next.get(dkey, 0.0):
+                    continue
+                self._click_attempts[dkey] = 0
+                self._cycle_next.pop(dkey, None)
+                self.log(f"  cool-off elapsed - fresh {CLICK_MAX_ATTEMPTS}-attempt "
+                         f"cycle on this bubble", "INFO")
             last_try = self._click_last.get(dkey, 0.0)
             if now - last_try < CLICK_RETRY_S:
                 continue
@@ -623,6 +640,7 @@ class Engine:
                 self._note_action()
                 self._pending.pop(dkey, None)
                 self._click_attempts.pop(dkey, None)
+                self._cycle_next.pop(dkey, None)
                 self._click_last.pop(dkey, None)
                 self.approved += 1
                 self.log(f"  APPROVED via {how}", "ACTION")
@@ -631,8 +649,10 @@ class Engine:
                 attempts += 1
                 self._click_attempts[dkey] = attempts
                 if attempts >= CLICK_MAX_ATTEMPTS:
+                    self._cycle_next[dkey] = now + self.cool_off_s
                     self.log(f"  FAILED {attempts}/{CLICK_MAX_ATTEMPTS}: bubble still "
-                             f"present - backing off until it clears", "ERROR")
+                             f"present - cooling off {int(self.cool_off_s)}s, then a "
+                             f"fresh cycle", "ERROR")
                 else:
                     self.log(f"  FAILED {attempts}/{CLICK_MAX_ATTEMPTS}: bubble still "
                              f"present after click - will retry", "WARN")
@@ -642,6 +662,7 @@ class Engine:
                       if not any(s.startswith(f"bubble:{k[0]}:{k[1]}") for k in snap)]:
             self._pending.pop(stale, None)
             self._click_attempts.pop(stale, None)
+            self._cycle_next.pop(stale, None)
             self._click_last.pop(stale, None)
         if len(self._rects) > DEDUPE_MAX:
             for s in list(self._rects)[:len(self._rects) - DEDUPE_MAX]:
@@ -676,7 +697,8 @@ class Engine:
             clicker = self._get_clicker()
             click_note = "ready" if clicker else "pending (will retry)"
         self.log(f"engine started (observe={self.observe}, interval={int(self.poll_s*1000)}ms, "
-                 f"burst_limit={self.burst_limit}, enable_click={self.enable_click} "
+                 f"burst_limit={self.burst_limit}, cool_off={int(self.cool_off_s)}s, "
+                 f"enable_click={self.enable_click} "
                  f"({click_note}), atspi={detail}, pid={os.getpid()})")
         while True:
             if self.exit_with_parent and os.getppid() != self._parent_pid:
@@ -704,6 +726,10 @@ def main(argv=None):
     ap.add_argument("--burst-limit", type=int, default=BURST_LIMIT_DEFAULT,
                     help="pause approvals for 60s after this many in a "
                          "minute (0 disables; default 60, same as upstream)")
+    ap.add_argument("--cool-off-s", type=float, default=CLICK_COOL_OFF_S,
+                    help="pause between click cycles after 3 failed attempts "
+                         "on one bubble, then a fresh cycle starts (0 = old "
+                         "wait-for-clear behaviour; default 30)")
     ap.add_argument("--enable-click", action="store_true",
                     help="arm auto-approval: screenshot + absolute-pointer click "
                          "on the Allow button (needs the auto-click deps; "
@@ -714,6 +740,7 @@ def main(argv=None):
                     exit_with_parent=args.exit_with_parent, diagnostics=args.diagnostics,
                     dialog_pattern=re.compile(args.dialog_pattern, re.I),
                     approve_pattern=re.compile(args.approve_pattern, re.I),
+                    cool_off_s=args.cool_off_s,
                     burst_limit=args.burst_limit,
                     enable_click=args.enable_click)
     if args.probe:

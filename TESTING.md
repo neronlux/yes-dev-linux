@@ -175,10 +175,13 @@ client: "RESULT after 9.0s: RESPONDED"  # hung CDP call completed, no human
 ```
 
 Also observed and handled: the **first click is occasionally swallowed**
-while the bubble animates in. The engine therefore retries (1s gap, max
-3 attempts, then waits for the bubble to clear); every retry after a
-swallowed click approved on attempt 2. `[ACTION]` is logged only after
-the child total returns to its pre-bubble base.
+while the bubble animates in. The engine therefore retries (1s gap,
+max 3 attempts per cycle); every retry after a swallowed click approved
+on attempt 2 — until the one that didn't: on 2026-09-22 17:54 a bubble
+swallowed all 3 and the engine then waited forever for it to clear (it
+never did). v0.8.2 adds a `--cool-off-s` pause (default 30s) and a
+fresh 3-attempt cycle, repeated until the bubble goes. `[ACTION]` is
+logged only after the child total returns to its pre-bubble base.
 
 Recap of what NOT to retry (all tried, all dead ends for good reasons):
 relative-device absolute moves, blind Enter (`Esc` burns the grant,
