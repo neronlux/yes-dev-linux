@@ -145,6 +145,14 @@ cd yes-dev-linux
 /usr/bin/python3 watcher_linux.py --probe                   # dump AT-SPI tree, exit
 ```
 
+Verify the whole stack in five seconds (AT-SPI, portal screenshot,
+pointer device, and a real click-delivery probe — briefly opens and
+closes the clock popup):
+
+```bash
+/usr/bin/python3 watcher_linux.py --selftest
+```
+
 Or via Homebrew (Linuxbrew):
 
 ```bash
@@ -158,6 +166,7 @@ brew install yes-dev-linux
 | `--enable-click` | Arm auto-approval (screenshot → find Allow → click). Off by default. |
 | `--once` | One sweep then exit (diagnostic, bypasses lock). |
 | `--probe` | Dump the AT-SPI tree around Chrome, then exit. |
+| `--selftest` | Check AT-SPI, portal screenshot, pointer and click delivery, then exit. |
 | `--interval-ms` | Poll interval, default 250 (150/250/750 like upstream). |
 | `--include-edge` | Also watch Microsoft Edge windows. |
 | `--dialog-pattern` | Dialog title regex (default `^allow remote debugging\?$`). Localised Chrome? Start here. |
@@ -244,8 +253,10 @@ Notes:
 
 ## Troubleshooting & recovery
 
-One-shot health check — read-only, safe any time, works beside the
-service. It reports the service, Chrome's debug port, `/dev/uinput` and
+First thing to try when anything looks off: `watcher_linux.py
+--selftest` proves the whole stack (AT-SPI, screenshot, pointer, click
+delivery) in one command. Then the deeper check — read-only, safe any
+time, works beside the service. It reports the service, Chrome's debug port, `/dev/uinput` and
 the portal, lock state, AT-SPI visibility, windows covering Chrome,
 stray clients, the engine's live state file, and its last actions, then
 prints the suggested next step:
@@ -376,6 +387,14 @@ the call hangs mid-handshake while the prompt is up).
 
 ## History
 
+- **v0.8.8** — host-targeted focusing and a self-test: the normalize
+  ladder's window cycling now checks the ACTIVE window's rect against
+  the tracked bubble host and keeps cycling until they match, instead
+  of maximizing whichever Chrome window happened to be active (a real
+  failure mode with two Chrome windows); `--selftest` proves AT-SPI,
+  portal screenshot, pointer creation and click delivery in one
+  command (briefly opens the clock popup), so installs can be verified
+  without waiting for a real prompt.
 - **v0.8.7** — operator-visible edges: the engine pauses all clicking
   while the session is locked (org.gnome.ScreenSaver, cached 5s) and
   logs it once a minute; `tools/doctor.py` now also checks

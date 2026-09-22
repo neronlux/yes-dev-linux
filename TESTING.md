@@ -279,7 +279,7 @@ for the loop.
 | 3 | Host window inactive | AT-SPI ACTIVE check | raise click -> held-Alt MRU walk -> Super+Up | - |
 | 4 | Host covered by another app | button not in screenshot | normalize rounds (3), incl. Super+` same-app cycling | stand-down + toggle hint if clustered |
 | 5 | Half-tiled / toggle maximize mid-state | area shrinks after Super+Up | verify area, press again | - |
-| 6 | Multiple Chrome windows | host != active window | Super+` in rounds 2+, migration by elevated total | - |
+| 6 | Multiple Chrome windows | host != active window | Super+` cycling until the ACTIVE rect matches the tracked host rect (bounded), then maximize; migration by elevated total | - |
 | 7 | Window moved / resized mid-bubble | rect key vanishes, elevated rect appears | migration follows the elevated total | - |
 | 8 | First click swallowed (focus/animation) | fresh screenshot still shows button | retry, 1s gap, 3 attempts | cool-off cycle |
 | 9 | All clicks swallowed | cycle exhausted | pointer device dropped, 30s cool-off, fresh cycle | - |

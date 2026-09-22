@@ -2,7 +2,7 @@
 """Yes, Dev engine for Linux: watch for Chrome's "Allow remote debugging?"
 consent dialog through AT-SPI.
 
-Status: v0.8.7. Detection via AT-SPI is proven live (titled dialogs by
+Status: v0.8.8. Detection via AT-SPI is proven live (titled dialogs by
 title, untitled Wayland bubbles by window-geometry child totals).
 Auto-approval works via a visual pipeline, proven end-to-end on
 2026-09-22: xdg-desktop-portal screenshot (no prompt) -> PIL finds the
@@ -23,7 +23,8 @@ Approval is verified two ways (fresh screenshot or child total), the
 normalize ladder runs 3 rounds, stand-downs are reason-coded, and a
 state.json feeds tools/doctor.py; the edge-case matrix lives in
 TESTING.md. Clicks pause while the session is locked, and an opt-in
---restart-chrome-on-stuck turns the stuck-queue hint into a restart.
+--restart-chrome-on-stuck turns the stuck-queue hint into a restart, and
+--selftest proves the whole stack without waiting for a real prompt.
 
 Boot-safe: the systemd user service starts before the desktop exists
 (linger + default.target), so every dependency is re-acquired lazily and
@@ -606,9 +607,25 @@ class Engine:
                      "reach); leaving this bubble alone", "WARN")
             return None
         if n >= 1:
-            auto_click.combo(clicker, "nextwindow")   # other Chrome window?
-            time.sleep(0.5)
-            act = self._active_chrome_frame() or act
+            # Cycle same-app windows until the ACTIVE one is the bubble's
+            # host (its rect matches the tracked dkey) - maximizing the
+            # wrong Chrome window was a real failure mode. Bounded.
+            try:
+                _, _, want = dkey.split(":", 2)
+            except Exception:
+                want = None
+            for _ in range(4):
+                act = self._active_chrome_frame() or act
+                have = None
+                try:
+                    b0 = act[1]
+                    have = f"{b0[0]},{b0[1]},{b0[2]}x{b0[3]}"
+                except Exception:
+                    pass
+                if want is None or have == want:
+                    break
+                auto_click.combo(clicker, "nextwindow")
+                time.sleep(0.5)
         kind, b = act
         # Ubuntu-style GNOME maps Super+Up to TOGGLE maximize: only send it
         # when the window clearly does not already fill the screen, or we
@@ -1190,11 +1207,74 @@ class Engine:
             time.sleep(self.poll_s)
 
 
+def run_selftest() -> int:
+    """End-to-end environment check: AT-SPI, portal screenshot, pointer
+    device, and a real click-delivery probe (briefly opens and closes the
+    clock popup). Friendly output; exit 0 when the stack works."""
+    print("yes-dev-linux selftest")
+    print("-" * 52)
+    ok = True
+    try:
+        desk = Atspi.get_desktop(0)
+        print(f"[OK]   AT-SPI reachable ({len(_children(desk))} desktop apps)")
+    except Exception as exc:
+        print(f"[FAIL] AT-SPI unreachable: {exc!r}")
+        print("       sudo apt install python3-gi gir1.2-atspi-2.0 (then re-login)")
+        return 1
+    if auto_click is None:
+        print("[FAIL] auto_click module missing - run with /usr/bin/python3")
+        return 1
+    shot = auto_click._portal_screenshot()
+    size = auto_click.image_size(shot) if shot else None
+    if size:
+        print(f"[OK]   portal screenshot works ({size[0]}x{size[1]})")
+    else:
+        print("[FAIL] portal screenshot failed - is xdg-desktop-portal running?")
+        ok = False
+    clicker = None
+    if size:
+        clicker = auto_click.AbsoluteClicker(size)
+        if clicker.available(size):
+            print(f"[OK]   absolute pointer created at {size[0]}x{size[1]}")
+        else:
+            print("[FAIL] cannot create the pointer: /dev/uinput not writable?")
+            print('       udev rule KERNEL=="uinput", MODE="0660", GROUP="input" '
+                  "+ membership in the input group")
+            clicker = None
+            ok = False
+    if clicker is not None and size and size[0] >= 400:
+        before = auto_click._portal_screenshot()
+        clicker.click(size[0] // 2, 8)      # clock / top-bar centre
+        time.sleep(1.2)
+        after = auto_click._portal_screenshot()
+        changed = False
+        try:
+            changed = (before is not None and after is not None
+                       and open(before, "rb").read() != open(after, "rb").read())
+        except Exception:
+            pass
+        auto_click.combo(clicker, "escape")  # dismiss whatever opened
+        if changed:
+            print("[OK]   click delivery: the screen changed after a test click")
+        else:
+            print("[WARN] click delivery: no visible change - the pointer may not "
+                  "reach the compositor")
+            print("       confirm with --observe on a real prompt")
+    if clicker is not None:
+        clicker.close()
+    print("-" * 52)
+    print("selftest:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Yes, Dev Linux engine (AT-SPI)")
     ap.add_argument("--observe", action="store_true", help="log dialogs, never click")
     ap.add_argument("--once", action="store_true", help="one sweep then exit")
     ap.add_argument("--probe", action="store_true", help="dump AT-SPI tree around Chrome, then exit")
+    ap.add_argument("--selftest", action="store_true",
+                    help="check AT-SPI, portal screenshot, pointer device and click "
+                         "delivery, then exit (briefly opens the clock popup)")
     ap.add_argument("--interval-ms", type=int, default=POLL_MS_DEFAULT)
     ap.add_argument("--include-edge", action="store_true")
     ap.add_argument("--log-path", default=str(LOG_PATH))
@@ -1218,6 +1298,8 @@ def main(argv=None):
                          "on the Allow button (needs the auto-click deps; "
                          "--observe always wins)")
     args = ap.parse_args(argv)
+    if args.selftest:
+        return run_selftest()
     engine = Engine(observe=args.observe, poll_ms=args.interval_ms,
                     include_edge=args.include_edge, log_path=Path(args.log_path),
                     exit_with_parent=args.exit_with_parent, diagnostics=args.diagnostics,

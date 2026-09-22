@@ -224,7 +224,7 @@ class AbsoluteClicker:
                     (e.ABS_Y, AbsInfo(0, 0, want[1] - 1, 0, 0, 1)),
                 ],
                 e.EV_KEY: [e.BTN_LEFT, e.KEY_LEFTMETA, e.KEY_LEFTALT,
-                           e.KEY_TAB, e.KEY_UP],
+                           e.KEY_TAB, e.KEY_UP, e.KEY_ESC],
             }
             dev = UInput(cap, name="yesdev absolute pointer", version=1)
         except Exception:
@@ -282,6 +282,7 @@ def combo(clicker, which: str) -> bool:
         "maximize": (e.KEY_LEFTMETA, e.KEY_UP),      # GNOME maximize (toggle on Ubuntu-style setups)
         "nextwindow": (e.KEY_LEFTMETA, e.KEY_GRAVE),  # cycle same-app windows
         "alttab": (e.KEY_LEFTALT, e.KEY_TAB),         # switch to previous window
+        "escape": (e.KEY_ESC,),                       # dismiss a popup (selftest)
     }
     codes = combos.get(which)
     if not codes or clicker is None:

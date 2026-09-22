@@ -34,6 +34,12 @@ sudo apt install python3-gi gir1.2-atspi-2.0 python3-pil python3-evdev \
 #   KERNEL=="uinput", MODE="0660", GROUP="input"
 ```
 
+Verify the environment first (AT-SPI, portal, pointer, click delivery):
+
+```bash
+/usr/bin/python3 watcher_linux.py --selftest
+```
+
 Then run it:
 
 ```bash
