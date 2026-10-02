@@ -17,6 +17,7 @@ imports are guarded, so a headless box without python3-gi also works):
 """
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -44,8 +45,15 @@ class FakeClicker:
         return True
 
 
+@contextmanager
+def _fake_shot(dest=None):
+    """Stands in for auto_click.screenshot(); yields a canned path."""
+    yield "/tmp/fake.png"
+
+
 stub = types.SimpleNamespace(AbsoluteClicker=FakeClicker, image_size=None,
                              _portal_screenshot=lambda: None,
+                             screenshot=_fake_shot,
                              find_allow_button=lambda p: None)
 w.auto_click = stub
 

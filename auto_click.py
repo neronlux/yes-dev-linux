@@ -22,8 +22,11 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
+from contextlib import contextmanager
+from pathlib import Path
 
 # Chrome's dark-theme button fill measured on Chrome 153 / GNOME 47:
 # (0, 75, 118). Also accept the lighter brand blues within tolerance.
@@ -36,23 +39,149 @@ BUTTON_H_RANGE = (16, 70)     # px
 BUTTON_W_RANGE = (40, 180)    # px
 
 
+def _pictures_dir() -> Path:
+    try:
+        cfg = Path.home() / ".config" / "user-dirs.dirs"
+        for line in cfg.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("XDG_PICTURES_DIR="):
+                val = line.split("=", 1)[1].strip().strip('"')
+                return Path(val.replace("$HOME", str(Path.home())))
+    except Exception:
+        pass
+    return Path.home() / "Pictures"
+
+
+def _is_portal_drop(path: str) -> bool:
+    """True for files the portal backend creates per capture (safe to delete).
+
+    On GNOME every Screenshot API call persists a sequential
+    Screenshot-N.png under ~/Pictures; other backends use the temp dir.
+    Never true for anything else, so user files are never touched."""
+    try:
+        p = Path(path)
+        if p.parent == Path(tempfile.gettempdir()):
+            return True
+        return (p.parent == _pictures_dir() and p.suffix == ".png"
+                and p.name.startswith("Screenshot"))
+    except Exception:
+        return False
+
+
+def _unlink_quiet(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+STALE_TRANSIENT_AGE_S = 24 * 3600  # crash leftovers older than this are ours to take
+_swept_once = False
+
+
+def sweep_stale_transients(max_age_s: int = STALE_TRANSIENT_AGE_S) -> int:
+    """Delete our temp captures abandoned by crashed runs (SIGTERM skips
+    cleanup handlers, so each restart could otherwise orphan one). Returns
+    the count removed. Only touches our own ysd-shot-*.png files in the
+    temp dir that are older than max_age_s."""
+    removed = 0
+    try:
+        now = time.time()
+        with os.scandir(tempfile.gettempdir()) as it:
+            for entry in it:
+                try:
+                    if (entry.name.startswith("ysd-shot-")
+                            and entry.name.endswith(".png")
+                            and entry.is_file(follow_symlinks=False)
+                            and now - entry.stat(follow_symlinks=False).st_mtime > max_age_s):
+                        os.unlink(entry.path)
+                        removed += 1
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return removed
+
+
+def _maybe_sweep() -> None:
+    global _swept_once
+    if _swept_once:
+        return
+    _swept_once = True
+    try:
+        sweep_stale_transients()
+    except Exception:
+        pass
+
+
+def portal_drop_backlog() -> tuple[int, int]:
+    """(count, bytes) of portal Screenshot drops in the Pictures dir.
+
+    A healthy engine leaves none (drops are relocated + deleted per
+    capture); thousands here means the cleanup regressed. One scandir of
+    a huge dir costs ~seconds, so callers must rate-limit (hourly)."""
+    n = total = 0
+    try:
+        with os.scandir(_pictures_dir()) as it:
+            for entry in it:
+                try:
+                    if (entry.name.startswith("Screenshot")
+                            and entry.name.endswith(".png")
+                            and entry.is_file(follow_symlinks=False)):
+                        n += 1
+                        total += entry.stat(follow_symlinks=False).st_size
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return n, total
+
+
+@contextmanager
+def screenshot(dest: str | None = None):
+    """Capture and yield a PNG path, deleting our temp copy afterwards.
+
+    Usage: callers must consume the shot inside the block (every current
+    caller does: size/detect run before the next capture). Files created
+    via `dest` belong to the caller and are left alone."""
+    path = _portal_screenshot(dest)
+    try:
+        yield path
+    finally:
+        if dest is None:
+            _unlink_quiet(path)
+
+
 def _portal_screenshot(dest: str | None = None) -> str | None:
     """Take a screenshot via xdg-desktop-portal. Returns the PNG path.
 
     Runs its own GLib loop for the request/response, safe to call from a
-    long-lived non-GLib process."""
+    long-lived non-GLib process.
+
+    Two hard-won cleanups live here, because a 24/7 engine trips both:
+    - the D-Bus signal match is removed in a finally (each leaked match
+      counts toward the 50k/connection cap, after which every portal
+      call fails);
+    - the portal backend persists every capture to disk (GNOME: a
+      sequential Screenshot-N.png under ~/Pictures - 150k files / 53GB
+      observed live). The drop is relocated to a temp file and deleted,
+      so steady-state disk use is ~1 screenshot, not one per capture."""
     try:
         import dbus
         import dbus.mainloop.glib
         from gi.repository import GLib
     except Exception:
         return None
+    _maybe_sweep()  # one cheap pass per process: clear crashed runs' leftovers
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     bus = dbus.SessionBus()
     token = f"ysd{os.getpid()}{int(time.time() * 1000) % 100000}"
     sender = bus.get_unique_name().replace(":", "").replace(".", "_")
     req_path = f"/org/freedesktop/portal/desktop/request/{sender}/{token}"
     got: dict = {}
+    loop = GLib.MainLoop()
 
     def on_response(code, results):
         got["code"] = int(code)
@@ -62,26 +191,48 @@ def _portal_screenshot(dest: str | None = None) -> str | None:
     bus.add_signal_receiver(on_response, signal_name="Response",
                             dbus_interface="org.freedesktop.portal.Request",
                             path=req_path)
-    obj = bus.get_object("org.freedesktop.portal.Desktop",
-                         "/org/freedesktop/portal/desktop")
-    iface = dbus.Interface(obj, "org.freedesktop.portal.Screenshot")
     try:
-        iface.Screenshot("", {"handle_token": token, "interactive": False})
-    except Exception:
-        return None
-    loop = GLib.MainLoop()
-    GLib.timeout_add_seconds(SCREENSHOT_TIMEOUT_S, lambda: loop.quit())
-    loop.run()
+        obj = bus.get_object("org.freedesktop.portal.Desktop",
+                             "/org/freedesktop/portal/desktop")
+        iface = dbus.Interface(obj, "org.freedesktop.portal.Screenshot")
+        try:
+            iface.Screenshot("", {"handle_token": token, "interactive": False})
+        except Exception:
+            return None
+        GLib.timeout_add_seconds(SCREENSHOT_TIMEOUT_S, lambda: loop.quit())
+        loop.run()
+    finally:
+        try:
+            bus.remove_signal_receiver(
+                on_response, signal_name="Response",
+                dbus_interface="org.freedesktop.portal.Request",
+                path=req_path)
+        except Exception:
+            pass
     if got.get("code") != 0 or not got.get("uri"):
         return None
     src = urllib.parse.urlparse(got["uri"]).path
+    if not src or not os.path.isfile(src):
+        return None
     if dest:
+        if os.path.abspath(src) == os.path.abspath(dest):
+            return dest
         try:
             shutil.copyfile(src, dest)
-            return dest
         except OSError:
             return None
-    return src
+        if _is_portal_drop(src):
+            _unlink_quiet(src)
+        return dest
+    try:
+        fd, tmp = tempfile.mkstemp(prefix="ysd-shot-", suffix=".png")
+        os.close(fd)
+        shutil.copyfile(src, tmp)
+    except OSError:
+        return None
+    if _is_portal_drop(src):
+        _unlink_quiet(src)
+    return tmp
 
 
 def find_allow_button(png_path: str) -> tuple[int, int] | None:
@@ -189,14 +340,14 @@ def _screen_size() -> tuple[int, int] | None:
     except Exception:
         pass
     # Fallback: the portal screenshot size is the logical desktop size.
-    shot = _portal_screenshot()
-    if shot:
-        try:
-            from PIL import Image
-            with Image.open(shot) as im:
-                return im.size
-        except Exception:
-            pass
+    with screenshot() as shot:
+        if shot:
+            try:
+                from PIL import Image
+                with Image.open(shot) as im:
+                    return im.size
+            except Exception:
+                pass
     return None
 
 
@@ -348,9 +499,15 @@ def image_size(png_path: str) -> tuple[int, int] | None:
 
 def allow_click(png_path: str | None = None) -> tuple[bool, str]:
     """Screenshot -> find Allow -> click. Returns (clicked, detail)."""
-    shot = png_path or _portal_screenshot()
-    if not shot:
-        return False, "screenshot failed (portal unavailable?)"
+    if png_path:
+        return _allow_click_on(png_path)
+    with screenshot() as shot:
+        if not shot:
+            return False, "screenshot failed (portal unavailable?)"
+        return _allow_click_on(shot)
+
+
+def _allow_click_on(shot: str) -> tuple[bool, str]:
     pt = find_allow_button(shot)
     if pt is None:
         return False, "Allow button not found in screenshot"

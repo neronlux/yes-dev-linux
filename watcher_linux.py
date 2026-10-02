@@ -131,6 +131,9 @@ NORMALIZE_ROUNDS = 3       # focus/maximize rounds per bubble before giving up
 LOCK_CACHE_S = 5           # how long a lock-state reading is trusted
 WORKSPACE_HUNT_MAX = 3     # off-workspace bubbles: hunt up to N workspaces over
 VISUAL_BACKSTOP_S = 5.0    # idle visual glance for bubbles the count missed (0=off)
+DROPCHECK_EVERY_S = 3600   # how often to check the Pictures dir for backlog
+DROPCHECK_WARN_COUNT = 500             # portal drops above this = cleanup regressed
+DROPCHECK_WARN_BYTES = 512 * 1024 * 1024
 CHROME_RESTART_COOLDOWN_S = 1800  # opt-in restart: at most once per 30 min
 CLICKER_RETRY_S = 15.0     # re-try clicker creation (boot order, RDP resize)
 ATSPI_REINIT_AFTER = 20    # consecutive failed scans before re-initialising
@@ -269,6 +272,7 @@ class Engine:
         self.visual_backstop_s = visual_backstop_s
         self._last_backstop = 0.0
         self._last_observe_backstop_log = 0.0
+        self._last_dropcheck = 0.0
         try:
             import json as _json
             st = _json.loads((Path(DATA_DIR) / "state.json").read_text())
@@ -559,8 +563,8 @@ class Engine:
             return False
         if auto_click is None:
             return False
-        shot = auto_click._portal_screenshot()
-        size = auto_click.image_size(shot) if shot else None
+        with auto_click.screenshot() as shot:
+            size = auto_click.image_size(shot) if shot else None
         clicker = self._get_clicker(size)
         if clicker is None or not clicker.click(*pt):
             return False
@@ -716,6 +720,30 @@ class Engine:
             time.sleep(0.4)
         self.log(f"  restored the workspace ({shift} switch(es) back)", "INFO")
 
+    def _portal_dropcheck(self, now: float) -> None:
+        """Hourly guard against portal-drop backlog in ~/Pictures.
+
+        The engine deletes every portal drop right after capture; an
+        accumulation here (150k files / 53GB filled the root disk live in
+        Sep 2026) means the cleanup regressed. Never auto-deletes (the
+        dir also holds the user's own screenshots) - just warns with the
+        exact cleanup command."""
+        if now - self._last_dropcheck < DROPCHECK_EVERY_S:
+            return
+        self._last_dropcheck = now
+        if auto_click is None:
+            return
+        try:
+            n, total = auto_click.portal_drop_backlog()
+        except Exception:
+            return
+        if n >= DROPCHECK_WARN_COUNT or total >= DROPCHECK_WARN_BYTES:
+            mb = total / (1024 * 1024)
+            self.log(f"portal drops accumulating in Pictures: {n} files "
+                     f"({mb:.0f} MB) - cleanup may have regressed; inspect then "
+                     f"run: find ~/Pictures -maxdepth 1 -name 'Screenshot*.png' "
+                     f"-mtime +1 -delete", "WARN")
+
     def _backstop_scan(self, now: float) -> None:
         """Idle visual glance: the child-count bump can be missed when a
         leaked node clears at the same time a new attach bumps (the count
@@ -725,11 +753,11 @@ class Engine:
         treat it as a candidate and let the normal click flow handle it."""
         if auto_click is None:
             return
-        shot = auto_click._portal_screenshot()
-        if not shot:
-            return
-        size = auto_click.image_size(shot)
-        pt = auto_click.find_allow_button(shot)
+        with auto_click.screenshot() as shot:
+            if not shot:
+                return
+            size = auto_click.image_size(shot)
+            pt = auto_click.find_allow_button(shot)
         if pt is None or size is None:
             return
         # position prior: the consent bubble sits centre-screen, not in
@@ -738,8 +766,8 @@ class Engine:
                 and 0.20 * size[1] <= pt[1] <= 0.80 * size[1]):
             return
         time.sleep(0.8)
-        shot2 = auto_click._portal_screenshot()
-        pt2 = auto_click.find_allow_button(shot2) if shot2 else None
+        with auto_click.screenshot() as shot2:
+            pt2 = auto_click.find_allow_button(shot2) if shot2 else None
         if pt2 is None or abs(pt2[0] - pt[0]) > 10 or abs(pt2[1] - pt[1]) > 10:
             return
         if self.observe:
@@ -921,19 +949,19 @@ class Engine:
         """
         if auto_click is None:
             return "failed", None
-        shot = auto_click._portal_screenshot()
-        if not shot:
-            self.log("  screenshot failed (xdg-desktop-portal?)", "WARN")
-            return "failed", None
-        size = auto_click.image_size(shot)
-        clicker = self._get_clicker(size)
-        if clicker is None:
-            return "failed", None
-        pt = auto_click.find_allow_button(shot)
+        with auto_click.screenshot() as shot:
+            if not shot:
+                self.log("  screenshot failed (xdg-desktop-portal?)", "WARN")
+                return "failed", None
+            size = auto_click.image_size(shot)
+            clicker = self._get_clicker(size)
+            if clicker is None:
+                return "failed", None
+            pt = auto_click.find_allow_button(shot)
         if pt is None and self._raise_host(dkey):
             time.sleep(VERIFY_WAIT_S)
-            shot = auto_click._portal_screenshot() or shot
-            pt = auto_click.find_allow_button(shot)
+            with auto_click.screenshot() as shot2:
+                pt = auto_click.find_allow_button(shot2) if shot2 else None
         if pt is None:
             return "no-button", None
         where = f"{pt} on {size[0]}x{size[1]}" if size else str(pt)
@@ -943,10 +971,11 @@ class Engine:
             return "failed", None
         time.sleep(VERIFY_WAIT_S)
         try:
-            after = auto_click._portal_screenshot()
+            with auto_click.screenshot() as after:
+                vis_gone = (after is not None
+                            and auto_click.find_allow_button(after) is None)
         except Exception:
-            after = None
-        vis_gone = after is not None and auto_click.find_allow_button(after) is None
+            vis_gone = False
         tot_gone = False
         if baseline:  # base 0 = visual backstop bubble, totals unknown
             try:
@@ -1300,6 +1329,7 @@ class Engine:
                 and (self.observe or (self.enable_click and not self._pending))):
             self._last_backstop = now
             self._backstop_scan(now)
+        self._portal_dropcheck(now)
         self._write_state(now)
 
     def probe(self):
@@ -1363,8 +1393,8 @@ def run_selftest() -> int:
     if auto_click is None:
         print("[FAIL] auto_click module missing - run with /usr/bin/python3")
         return 1
-    shot = auto_click._portal_screenshot()
-    size = auto_click.image_size(shot) if shot else None
+    with auto_click.screenshot() as shot:
+        size = auto_click.image_size(shot) if shot else None
     if size:
         print(f"[OK]   portal screenshot works ({size[0]}x{size[1]})")
     else:
@@ -1382,16 +1412,16 @@ def run_selftest() -> int:
             clicker = None
             ok = False
     if clicker is not None and size and size[0] >= 400:
-        before = auto_click._portal_screenshot()
-        clicker.click(size[0] // 2, 8)      # clock / top-bar centre
-        time.sleep(1.2)
-        after = auto_click._portal_screenshot()
-        changed = False
-        try:
-            changed = (before is not None and after is not None
-                       and open(before, "rb").read() != open(after, "rb").read())
-        except Exception:
-            pass
+        with auto_click.screenshot() as before:
+            clicker.click(size[0] // 2, 8)      # clock / top-bar centre
+            time.sleep(1.2)
+            with auto_click.screenshot() as after:
+                changed = False
+                try:
+                    changed = (before is not None and after is not None
+                               and open(before, "rb").read() != open(after, "rb").read())
+                except Exception:
+                    pass
         auto_click.combo(clicker, "escape")  # dismiss whatever opened
         if changed:
             print("[OK]   click delivery: the screen changed after a test click")

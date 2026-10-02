@@ -286,6 +286,7 @@ by an offline test only, OPEN = designed-for but not exercised.
 | Child-bump aliasing (leak/clear race) -> visual backstop | LIVE + UNIT | 21:09 caught it ~2s after restart; unit test covers region prior + candidate creation |
 | Leaked child totals -> visual verify accepts + leak note | LIVE | leak note logged on several approvals |
 | Screenshot lag -> totals verify accepts | UNIT | two-way branch not distinctly observed |
+| Portal drops accumulate (150k/53GB in ~/Pictures) + D-Bus match leak (50k cap) -> per-capture cleanup + hourly backlog WARN | LIVE + UNIT | Sep 2026 incident filled root to 99%; fix verified live (Pictures frozen, zero tmp residue), tests/test_cleanup.py |
 | RDP/desktop resize -> pointer rebuilt at new size | UNIT | no real logical size change occurred on this VM |
 | Service restart -> restart=always, lock, fresh pointer | LIVE | multiple restarts |
 | Real reboot end-to-end (service, pointer, selftest, Chrome, approve) | LIVE | 21:02-21:03, unattended VERDICT: WORKS |
